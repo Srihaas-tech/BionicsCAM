@@ -1053,6 +1053,55 @@ class FRCPostProcessor:
             self._add_error(error_msg)
             print(f"  ❌ {error_msg}")
     
+    def get_part_bounds(self):
+        """Return (width, height) of the part after transform_coordinates.
+        The part sits at origin (0,0) post-transform so bounds == dimensions."""
+        all_x = []
+        all_y = []
+        for circle in self.circles:
+            cx, cy = circle['center']
+            r = circle.get('radius') or (circle.get('diameter', 0) / 2)
+            all_x.extend([cx - r, cx + r])
+            all_y.extend([cy - r, cy + r])
+        for line in self.lines:
+            all_x.extend([line['start'][0], line['end'][0]])
+            all_y.extend([line['start'][1], line['end'][1]])
+        for polyline in self.polylines:
+            for x, y in polyline:
+                all_x.append(x)
+                all_y.append(y)
+        if not all_x:
+            return (0.0, 0.0)
+        return (max(all_x) - min(all_x), max(all_y) - min(all_y))
+
+    @staticmethod
+    def offset_gcode(gcode: str, dx: float = 0.0, dy: float = 0.0) -> str:
+        """Shift all X/Y coordinates in a G-code string by (dx, dy).
+        Used by the nesting layer to place copies at different positions on stock.
+        """
+        import re
+        x_pat = re.compile(r'(X)(-?\d+\.\d+)')
+        y_pat = re.compile(r'(Y)(-?\d+\.\d+)')
+
+        def shift_x(m):
+            return m.group(1) + f"{float(m.group(2)) + dx:.4f}"
+
+        def shift_y(m):
+            return m.group(1) + f"{float(m.group(2)) + dy:.4f}"
+
+        lines_out = []
+        for line in gcode.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('(') or stripped.startswith(';'):
+                lines_out.append(line)
+                continue
+            if dx != 0.0:
+                line = x_pat.sub(shift_x, line)
+            if dy != 0.0:
+                line = y_pat.sub(shift_y, line)
+            lines_out.append(line)
+        return '\n'.join(lines_out)
+
     def classify_holes(self):
         """Classify holes by diameter"""
         # Classify all circles as holes (apply size check)
