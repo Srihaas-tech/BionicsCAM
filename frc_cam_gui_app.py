@@ -521,6 +521,7 @@ def process_file():
         origin_corner = request.form.get('origin_corner', 'bottom-left')
         rotation = int(request.form.get('rotation', 0))
         use_25d = request.form.get('use25d', 'false').lower() == 'true'
+        quantity = max(1, min(int(request.form.get('quantity', 1)), 50))  # clamp 1-50
         suggested_filename = request.form.get('suggested_filename', '')
 
         # Get timestamp from client (in user's local timezone)
@@ -672,6 +673,62 @@ def process_file():
                 # Generate G-code using API
                 result = pp.generate_gcode(suggested_filename=base_name, timestamp=timestamp_str)
 
+                # --- Nesting: repeat the part N times across the stock sheet ---
+                if quantity > 1 and result.success:
+                    part_w, part_h = pp.get_part_bounds()
+                    gap = pp.tool_diameter  # minimum clearance between parts
+                    step_x = part_w + gap
+                    step_y = part_h + gap
+                    stock_x = pp.config.machine_x_max
+                    stock_y = pp.config.machine_y_max
+
+                    cols = max(1, int(stock_x / step_x))
+                    rows = max(1, int(stock_y / step_y))
+                    max_parts = cols * rows
+
+                    if quantity > max_parts:
+                        result.warnings.append(
+                            f"Requested {quantity} parts but only {max_parts} fit on "
+                            f"{stock_x:.1f}\" x {stock_y:.1f}\" stock ({cols} cols x {rows} rows). "
+                            f"Generating {max_parts}."
+                        )
+                        quantity = max_parts
+
+                    # Build combined G-code: header from copy 1, then toolpath blocks for all copies
+                    combined_blocks = []
+                    copy_num = 0
+                    done = False
+                    for row in range(rows):
+                        if done:
+                            break
+                        for col in range(cols):
+                            if copy_num >= quantity:
+                                done = True
+                                break
+                            dx = col * step_x
+                            dy = row * step_y
+                            shifted = FRCPostProcessor.offset_gcode(result.gcode, dx=dx, dy=dy)
+                            if copy_num == 0:
+                                # Keep full G-code (header + toolpath + footer) for copy 1
+                                combined_blocks.append(shifted)
+                            else:
+                                # Extract only the toolpath lines (strip header/footer)
+                                # Header ends at first motion command; footer starts at M30/M2
+                                lines = shifted.splitlines()
+                                start = next((i for i, l in enumerate(lines)
+                                              if l.strip() and not l.strip().startswith('(')
+                                              and any(c in l for c in ('G0 ', 'G1 ', 'G2 ', 'G3 ', 'G00', 'G01', 'G02', 'G03', 'M3', 'M03'))), 0)
+                                end = next((i for i, l in enumerate(lines)
+                                            if l.strip().startswith(('M30', 'M2 ', 'M02', 'M2\n'))), len(lines))
+                                combined_blocks.append(f"( --- Copy {copy_num + 1}: X+{dx:.3f}\" Y+{dy:.3f}\" --- )")
+                                combined_blocks.append('\n'.join(lines[start:end]))
+                            copy_num += 1
+
+                    result.gcode = '\n'.join(combined_blocks)
+                    result.stats['quantity'] = quantity
+                    result.stats['nesting_cols'] = cols
+                    result.stats['nesting_rows'] = rows
+
             if not result.success:
                 log(f"❌ Post-processor API failed!")
                 for error in result.errors:
@@ -703,7 +760,12 @@ def process_file():
 
         # Build console output from result stats (for backward compatibility with UI)
         console_lines = []
-        console_lines.append(f"Identified {result.stats.get('num_holes', 0)} millable holes and {result.stats.get('num_pockets', 0)} pockets")
+        qty = result.stats.get('quantity', 1)
+        if qty > 1:
+            cols = result.stats.get('nesting_cols', 1)
+            rows = result.stats.get('nesting_rows', 1)
+            console_lines.append(f"Nesting {qty} copies ({cols} cols x {rows} rows)")
+        console_lines.append(f"Identified {result.stats.get('num_holes', 0)} millable holes and {result.stats.get('num_pockets', 0)} pockets per copy")
         console_lines.append(f"Total lines: {result.stats.get('total_lines', 0)}")
         if 'cycle_time_display' in result.stats:
             console_lines.append(f"\n⏱️  ESTIMATED_CYCLE_TIME: {result.stats['cycle_time_seconds']:.1f} seconds ({result.stats['cycle_time_display']})")
