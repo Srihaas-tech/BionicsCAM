@@ -561,6 +561,8 @@ document.addEventListener('DOMContentLoaded', () => {
             formData.append('rotation', rotationAngle); // Add rotation angle
             const quantityVal = parseInt(document.getElementById('quantity')?.value || '1', 10);
             formData.append('quantity', Math.max(1, quantityVal));
+            const nestRotationVal = document.getElementById('nestRotation')?.value || 'auto';
+            formData.append('nest_rotation', nestRotationVal);
             if (appState.suggestedFilename) {
                 formData.append('suggested_filename', appState.suggestedFilename); // Onshape filename
             }
@@ -966,6 +968,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (tubeParams) {
                 tubeParams.style.display = isAluminumTube ? 'block' : 'none';
             if (quantityGroup) quantityGroup.style.display = isAluminumTube ? 'none' : 'block';
+            const nestRotationGroup = document.getElementById('nestRotationGroup');
+            if (nestRotationGroup) nestRotationGroup.style.display = isAluminumTube ? 'none' : 'block';
             }
         }
 
