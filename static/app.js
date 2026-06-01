@@ -559,6 +559,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 formData.append('tab_spacing', document.getElementById('tabSpacing').value);
             }
             formData.append('rotation', rotationAngle); // Add rotation angle
+            const quantityVal = parseInt(document.getElementById('quantity')?.value || '1', 10);
+            formData.append('quantity', Math.max(1, quantityVal));
+            const nestRotationVal = document.getElementById('nestRotation')?.value || 'auto';
+            formData.append('nest_rotation', nestRotationVal);
             if (appState.suggestedFilename) {
                 formData.append('suggested_filename', appState.suggestedFilename); // Onshape filename
             }
@@ -932,6 +936,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const materialSelect = document.getElementById('material');
             const tubeParams = document.getElementById('tubeParams');
             const thicknessInput = document.getElementById('thickness');
+            const quantityGroup = document.getElementById('quantityGroup');
             const isAluminumTube = materialSelect.value === 'aluminum_tube';
             const isMultiDepth = isMultiDepthMode();
 
@@ -962,6 +967,9 @@ document.addEventListener('DOMContentLoaded', () => {
             // Hide tube parameters unless aluminum_tube is selected
             if (tubeParams) {
                 tubeParams.style.display = isAluminumTube ? 'block' : 'none';
+            if (quantityGroup) quantityGroup.style.display = isAluminumTube ? 'none' : 'block';
+            const nestRotationGroup = document.getElementById('nestRotationGroup');
+            if (nestRotationGroup) nestRotationGroup.style.display = isAluminumTube ? 'none' : 'block';
             }
         }
 

@@ -7,6 +7,12 @@
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/png" href="/static/bionicslogo.png">
     <script defer src="https://cdn.vercel-insights.com/v1/script.js"></script>
+    
+    <!-- Vercel Speed Insights -->
+    <script>
+        window.si = window.si || function () { (window.siq = window.siq || []).push(arguments); };
+    </script>
+    <script defer src="/_vercel/speed-insights/script.js"></script>
 </head>
 <body>
     <!-- Part Selection Modal (shown when multiple parts detected) -->
@@ -197,6 +203,26 @@
                                 ℹ️ This thickness was auto-detected from your CAD part. Your stock material must match this thickness for accurate machining.
                             </div>
                             {% endif %}
+                        </div>
+
+                        <div class="param-group" id="quantityGroup">
+                            <label>
+                                Quantity
+                                <span class="label-hint">How many copies to cut from one sheet</span>
+                            </label>
+                            <input type="number" id="quantity" value="1" min="1" max="50" step="1" required>
+                        </div>
+
+                        <div class="param-group" id="nestRotationGroup">
+                            <label>
+                                Nesting Rotation
+                                <span class="label-hint">Rotate copies to fit more on the sheet</span>
+                            </label>
+                            <select id="nestRotation">
+                                <option value="auto">Auto (best fit)</option>
+                                <option value="0">0° — no rotation</option>
+                                <option value="90">90° — rotate all copies</option>
+                            </select>
                         </div>
 
                         <div class="param-group" style="display: none;">

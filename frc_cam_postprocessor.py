@@ -1053,6 +1053,123 @@ class FRCPostProcessor:
             self._add_error(error_msg)
             print(f"  ❌ {error_msg}")
     
+    def get_part_bounds(self):
+        """Return (width, height) of the part after transform_coordinates.
+        The part sits at origin (0,0) post-transform so bounds == dimensions."""
+        all_x = []
+        all_y = []
+        for circle in self.circles:
+            cx, cy = circle['center']
+            r = circle.get('radius') or (circle.get('diameter', 0) / 2)
+            all_x.extend([cx - r, cx + r])
+            all_y.extend([cy - r, cy + r])
+        for line in self.lines:
+            all_x.extend([line['start'][0], line['end'][0]])
+            all_y.extend([line['start'][1], line['end'][1]])
+        for polyline in self.polylines:
+            for x, y in polyline:
+                all_x.append(x)
+                all_y.append(y)
+        if not all_x:
+            return (0.0, 0.0)
+        return (max(all_x) - min(all_x), max(all_y) - min(all_y))
+
+    @staticmethod
+    def rotate_gcode_90(gcode: str, part_w: float, part_h: float) -> str:
+        """Rotate all X/Y coordinates 90° CCW around the part origin, then
+        translate back so the result sits in positive space (origin at 0,0).
+
+        90° CCW transform:  (x, y) -> (-y, x)
+        After rotation the bounding box is (−part_h..0, 0..part_w).
+        We translate by (+part_h, 0) to return to positive space:
+            final: (x, y) -> (part_h - y,  x)
+
+        Arc direction codes G2/G3 swap because CCW rotation inverts winding.
+        I/J arc offsets rotate the same way as X/Y.
+        """
+        import re
+        coord_pat = re.compile(r'([XYIJ])(-?\d+\.\d+)')
+
+        def rotate_coords(line):
+            # Collect all coord tokens on this line
+            tokens = {m.group(1): float(m.group(2)) for m in coord_pat.finditer(line)}
+            if not tokens:
+                return line
+
+            result = line
+            new_vals = {}
+
+            # Rotate X/Y: new_x = part_h - old_y,  new_y = old_x
+            if 'X' in tokens or 'Y' in tokens:
+                old_x = tokens.get('X', 0.0)
+                old_y = tokens.get('Y', 0.0)
+                new_vals['X'] = part_h - old_y
+                new_vals['Y'] = old_x
+
+            # Rotate I/J arc offsets the same way (they are relative vectors)
+            if 'I' in tokens or 'J' in tokens:
+                old_i = tokens.get('I', 0.0)
+                old_j = tokens.get('J', 0.0)
+                new_vals['I'] = -old_j
+                new_vals['J'] = old_i
+
+            # Substitute back
+            def replacer(m):
+                key = m.group(1)
+                if key in new_vals:
+                    return key + f"{new_vals[key]:.4f}"
+                return m.group(0)
+
+            result = coord_pat.sub(replacer, result)
+
+            # Swap G2 <-> G3 (arc direction flips under rotation)
+            result = re.sub(r'\bG2\b', 'G2_TMP', result)
+            result = re.sub(r'\bG3\b', 'G2', result)
+            result = re.sub(r'G2_TMP', 'G3', result)
+            # Handle zero-padded variants
+            result = re.sub(r'\bG02\b', 'G02_TMP', result)
+            result = re.sub(r'\bG03\b', 'G02', result)
+            result = re.sub(r'G02_TMP', 'G03', result)
+
+            return result
+
+        lines_out = []
+        for line in gcode.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('(') or stripped.startswith(';'):
+                lines_out.append(line)
+                continue
+            lines_out.append(rotate_coords(line))
+        return '\n'.join(lines_out)
+
+    @staticmethod
+    def offset_gcode(gcode: str, dx: float = 0.0, dy: float = 0.0) -> str:
+        """Shift all X/Y coordinates in a G-code string by (dx, dy).
+        Used by the nesting layer to place copies at different positions on stock.
+        """
+        import re
+        x_pat = re.compile(r'(X)(-?\d+\.\d+)')
+        y_pat = re.compile(r'(Y)(-?\d+\.\d+)')
+
+        def shift_x(m):
+            return m.group(1) + f"{float(m.group(2)) + dx:.4f}"
+
+        def shift_y(m):
+            return m.group(1) + f"{float(m.group(2)) + dy:.4f}"
+
+        lines_out = []
+        for line in gcode.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('(') or stripped.startswith(';'):
+                lines_out.append(line)
+                continue
+            if dx != 0.0:
+                line = x_pat.sub(shift_x, line)
+            if dy != 0.0:
+                line = y_pat.sub(shift_y, line)
+            lines_out.append(line)
+        return '\n'.join(lines_out)
+
     def classify_holes(self):
         """Classify holes by diameter"""
         # Classify all circles as holes (apply size check)

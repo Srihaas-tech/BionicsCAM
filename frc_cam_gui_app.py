@@ -521,6 +521,9 @@ def process_file():
         origin_corner = request.form.get('origin_corner', 'bottom-left')
         rotation = int(request.form.get('rotation', 0))
         use_25d = request.form.get('use25d', 'false').lower() == 'true'
+        quantity = max(1, min(int(request.form.get('quantity', 1)), 50))  # clamp 1-50
+        # nest_rotation: 'auto' | '0' | '90'
+        nest_rotation = request.form.get('nest_rotation', 'auto')
         suggested_filename = request.form.get('suggested_filename', '')
 
         # Get timestamp from client (in user's local timezone)
@@ -672,6 +675,93 @@ def process_file():
                 # Generate G-code using API
                 result = pp.generate_gcode(suggested_filename=base_name, timestamp=timestamp_str)
 
+                # --- Nesting: repeat the part N times across the stock sheet ---
+                if quantity > 1 and result.success:
+                    part_w, part_h = pp.get_part_bounds()
+                    gap = pp.tool_diameter  # minimum clearance between parts
+                    stock_x = pp.config.machine_x_max
+                    stock_y = pp.config.machine_y_max
+
+                    # Determine whether to rotate 90°
+                    # Normal layout:  each slot is part_w × part_h
+                    # Rotated layout: each slot is part_h × part_w  (dimensions swap)
+                    def fits(pw, ph):
+                        c = max(1, int(stock_x / (pw + gap)))
+                        r = max(1, int(stock_y / (ph + gap)))
+                        return c, r, c * r
+
+                    cols_0, rows_0, max_0 = fits(part_w, part_h)
+                    cols_90, rows_90, max_90 = fits(part_h, part_w)
+
+                    if nest_rotation == '90':
+                        do_rotate = True
+                    elif nest_rotation == '0':
+                        do_rotate = False
+                    else:  # 'auto' — pick whichever packs more parts
+                        do_rotate = (max_90 > max_0)
+
+                    if do_rotate:
+                        base_gcode = FRCPostProcessor.rotate_gcode_90(result.gcode, part_w, part_h)
+                        slot_w, slot_h = part_h, part_w   # dimensions after rotation
+                        cols, rows, max_parts = cols_90, rows_90, max_90
+                        rotation_label = '90°'
+                    else:
+                        base_gcode = result.gcode
+                        slot_w, slot_h = part_w, part_h
+                        cols, rows, max_parts = cols_0, rows_0, max_0
+                        rotation_label = '0°'
+
+                    step_x = slot_w + gap
+                    step_y = slot_h + gap
+
+                    if quantity > max_parts:
+                        result.warnings.append(
+                            f"Requested {quantity} parts but only {max_parts} fit on "
+                            f"{stock_x:.1f}\" x {stock_y:.1f}\" stock "
+                            f"({cols} cols x {rows} rows, rotation={rotation_label}). "
+                            f"Generating {max_parts}."
+                        )
+                        quantity = max_parts
+
+                    # Build combined G-code: full file for copy 1, toolpath-only for the rest
+                    def extract_toolpath(gcode_str):
+                        lines = gcode_str.splitlines()
+                        start = next((i for i, l in enumerate(lines)
+                                      if l.strip() and not l.strip().startswith('(')
+                                      and any(c in l for c in ('G0 ', 'G1 ', 'G2 ', 'G3 ',
+                                                                'G00', 'G01', 'G02', 'G03',
+                                                                'M3', 'M03'))), 0)
+                        end = next((i for i, l in enumerate(lines)
+                                    if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
+                        return '\n'.join(lines[start:end])
+
+                    combined_blocks = []
+                    copy_num = 0
+                    done = False
+                    for row in range(rows):
+                        if done:
+                            break
+                        for col in range(cols):
+                            if copy_num >= quantity:
+                                done = True
+                                break
+                            dx = col * step_x
+                            dy = row * step_y
+                            shifted = FRCPostProcessor.offset_gcode(base_gcode, dx=dx, dy=dy)
+                            if copy_num == 0:
+                                combined_blocks.append(shifted)
+                            else:
+                                combined_blocks.append(
+                                    f"( --- Copy {copy_num + 1}: X+{dx:.3f}\" Y+{dy:.3f}\" rot={rotation_label} --- )")
+                                combined_blocks.append(extract_toolpath(shifted))
+                            copy_num += 1
+
+                    result.gcode = '\n'.join(combined_blocks)
+                    result.stats['quantity'] = quantity
+                    result.stats['nesting_cols'] = cols
+                    result.stats['nesting_rows'] = rows
+                    result.stats['nesting_rotation'] = rotation_label
+
             if not result.success:
                 log(f"❌ Post-processor API failed!")
                 for error in result.errors:
@@ -703,7 +793,13 @@ def process_file():
 
         # Build console output from result stats (for backward compatibility with UI)
         console_lines = []
-        console_lines.append(f"Identified {result.stats.get('num_holes', 0)} millable holes and {result.stats.get('num_pockets', 0)} pockets")
+        qty = result.stats.get('quantity', 1)
+        if qty > 1:
+            cols = result.stats.get('nesting_cols', 1)
+            rows = result.stats.get('nesting_rows', 1)
+            rot = result.stats.get('nesting_rotation', '0°')
+            console_lines.append(f"Nesting {qty} copies ({cols} cols x {rows} rows, rotation={rot})")
+        console_lines.append(f"Identified {result.stats.get('num_holes', 0)} millable holes and {result.stats.get('num_pockets', 0)} pockets per copy")
         console_lines.append(f"Total lines: {result.stats.get('total_lines', 0)}")
         if 'cycle_time_display' in result.stats:
             console_lines.append(f"\n⏱️  ESTIMATED_CYCLE_TIME: {result.stats['cycle_time_seconds']:.1f} seconds ({result.stats['cycle_time_display']})")
