@@ -14,6 +14,8 @@
     const sendBtn = document.getElementById('sendToBionicsCAM');
     const selectAnotherBtn = document.getElementById('selectAnotherFace');
     const multilayerCheckbox = document.getElementById('multilayerMode');
+    const multiPartGroup = document.getElementById('multiPartGroup');
+    const importAllPartsBtn = document.getElementById('importAllParts');
     const mode2DLabel = document.getElementById('mode2DLabel');
     const mode25DLabel = document.getElementById('mode25DLabel');
     const modeHint = document.getElementById('modeHint');
@@ -75,6 +77,9 @@
         // Set up mode checkbox handler
         multilayerCheckbox.addEventListener('change', updateModeInstructions);
 
+        // Set up multi-part import button
+        importAllPartsBtn.addEventListener('click', handleImportAllParts);
+
         // Initialize mode instructions
         updateModeInstructions();
     }
@@ -86,21 +91,21 @@
         const isMultilayer = multilayerCheckbox.checked;
 
         if (isMultilayer) {
-            // 2.5D mode - stock must match CAD
+            // 2.5D mode - show multi-part button + face selection
             mode2DLabel.classList.remove('active');
             mode25DLabel.classList.add('active');
             modeHint.textContent = 'Stock thickness must match CAD part thickness';
-            // Update instruction if no face selected
+            multiPartGroup.style.display = 'flex';
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture';
+                instruction.innerHTML = 'Or select a face at the <strong>top-most layer</strong> for a single part';
                 instruction.style.color = '';
             }
         } else {
-            // 2D mode - any stock works
+            // 2D mode - hide multi-part button
             mode2DLabel.classList.add('active');
             mode25DLabel.classList.remove('active');
             modeHint.textContent = 'Any stock thickness works - cutting a flat pattern only';
-            // Update instruction if no face selected
+            multiPartGroup.style.display = 'none';
             if (!selectedFaceId && instruction.style.display !== 'none') {
                 instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture';
                 instruction.style.color = '';
@@ -205,7 +210,7 @@
     /**
      * Build URL with Onshape context parameters
      */
-    function buildUrl(endpoint) {
+    function buildUrl(endpoint, { multi = false } = {}) {
         const params = new URLSearchParams({
             documentId: context.documentId,
             workspaceId: context.workspaceId,
@@ -213,21 +218,32 @@
             server: context.server
         });
 
-        // Add face ID if selected
-        if (selectedFaceId) {
-            params.append('faceId', selectedFaceId);
+        if (multi) {
+            params.append('multi', 'true');
+            params.append('multilayer', 'true');
+        } else {
+            // Add face ID if selected
+            if (selectedFaceId) {
+                params.append('faceId', selectedFaceId);
+            }
+            // Add part ID if available
+            if (selectedPartId) {
+                params.append('partId', selectedPartId);
+            }
+            const isMultilayer = multilayerCheckbox.checked;
+            params.append('multilayer', isMultilayer ? 'true' : 'false');
         }
-
-        // Add part ID if available
-        if (selectedPartId) {
-            params.append('partId', selectedPartId);
-        }
-
-        // Add multilayer mode
-        const isMultilayer = multilayerCheckbox.checked;
-        params.append('multilayer', isMultilayer ? 'true' : 'false');
 
         return `${context.baseUrl}${endpoint}?${params.toString()}`;
+    }
+
+    /**
+     * Handle "Import all parts" button — sends every body as a separate DXF
+     */
+    function handleImportAllParts() {
+        const url = buildUrl('/onshape/import', { multi: true });
+        console.log('Opening BionicsCAM multi-part import:', url);
+        window.open(url, '_blank');
     }
 
     /**
