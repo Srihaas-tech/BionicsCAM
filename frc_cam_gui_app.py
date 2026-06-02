@@ -1779,16 +1779,29 @@ def onshape_import():
         multi_parts = raw_params.get('multi', 'false').lower() in ('true', '1', 'yes')
         if multi_parts:
             multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
-            log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
-            part_exports = client.export_all_parts_as_dxfs(
-                document_id, workspace_id, element_id,
-                multilayer=multilayer_for_multi
-            )
+            selected_face_ids_raw = raw_params.get('faceIds', '').strip()
+            selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
+
+            if selected_face_ids:
+                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+                part_exports = client.export_selected_faces_as_dxfs(
+                    document_id, workspace_id, element_id,
+                    selected_face_ids,
+                    multilayer=multilayer_for_multi
+                )
+                empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
+            else:
+                log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+                part_exports = client.export_all_parts_as_dxfs(
+                    document_id, workspace_id, element_id,
+                    multilayer=multilayer_for_multi
+                )
+                empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
 
             if not part_exports:
                 return jsonify({
                     'error': 'No parts could be exported from this document',
-                    'message': 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
+                    'message': empty_message
                 }), 500
 
             dxf_files_inline = []
@@ -1822,7 +1835,7 @@ def onshape_import():
                                  dxf_file='', dxf_content_inline=None,
                                  dxf_files_inline=dxf_files_inline,
                                  from_onshape=True, document_id=document_id,
-                                 face_id='', suggested_filename='Onshape_multi_import', detected_thickness=None,
+                                 face_id='', suggested_filename='Onshape_selected_import' if selected_face_ids else 'Onshape_multi_import', detected_thickness=None,
                                  user_name=session.get('user_name'), team_name=session.get('team_name'),
                                  drive_enabled=drive_enabled, machine_x_max=machine_x_max,
                                  machine_y_max=machine_y_max, default_tool_diameter=default_tool_diameter,
