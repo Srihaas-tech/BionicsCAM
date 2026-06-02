@@ -17,6 +17,8 @@
     const mode2DLabel = document.getElementById('mode2DLabel');
     const mode25DLabel = document.getElementById('mode25DLabel');
     const modeHint = document.getElementById('modeHint');
+    const multiPartGroup = document.getElementById('multiPartGroup');
+    const importAllPartsBtn = document.getElementById('importAllParts');
 
     // Onshape context from template
     const context = window.ONSHAPE_CONTEXT;
@@ -71,6 +73,9 @@
         // Set up button handlers
         sendBtn.addEventListener('click', handleSendToBionicsCAM);
         selectAnotherBtn.addEventListener('click', handleSelectAnother);
+        if (importAllPartsBtn) {
+            importAllPartsBtn.addEventListener('click', handleImportAllParts);
+        }
 
         // Set up mode checkbox handler
         multilayerCheckbox.addEventListener('change', updateModeInstructions);
@@ -90,9 +95,20 @@
             mode2DLabel.classList.remove('active');
             mode25DLabel.classList.add('active');
             modeHint.textContent = 'Stock thickness must match CAD part thickness';
+
+            // Allow a fast all-parts import. This does not fetch authenticated
+            // data inside the iframe; it opens the normal BionicsCAM import
+            // route with multi=true so the backend does the Onshape API work.
+            if (multiPartGroup) {
+                multiPartGroup.style.display = 'flex';
+            }
+            if (importAllPartsBtn) {
+                importAllPartsBtn.textContent = '⬆ Import all parts as 2.5D';
+            }
+
             // Update instruction if no face selected
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture';
+                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture, or import all parts';
                 instruction.style.color = '';
             }
         } else {
@@ -100,9 +116,17 @@
             mode2DLabel.classList.add('active');
             mode25DLabel.classList.remove('active');
             modeHint.textContent = 'Any stock thickness works - cutting a flat pattern only';
+
+            if (multiPartGroup) {
+                multiPartGroup.style.display = 'flex';
+            }
+            if (importAllPartsBtn) {
+                importAllPartsBtn.textContent = '⬆ Import all parts as 2D';
+            }
+
             // Update instruction if no face selected
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture';
+                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture, or import all parts';
                 instruction.style.color = '';
             }
         }
@@ -244,6 +268,30 @@
         // Immediately request another face selection for the next operation
         // This creates a select-then-send workflow
         requestFaceSelection();
+    }
+
+    /**
+     * Handle "Import all parts" button.
+     *
+     * Important: this does NOT call an authenticated Onshape API endpoint
+     * from inside the iframe. The iframe may not have the same cookie/session
+     * behavior as a normal BionicsCAM tab. Instead, it opens the existing
+     * /onshape/import backend route with multi=true, and the backend performs
+     * the authenticated Onshape API calls from the normal BionicsCAM domain.
+     */
+    function handleImportAllParts() {
+        const params = new URLSearchParams({
+            documentId: context.documentId,
+            workspaceId: context.workspaceId,
+            elementId: context.elementId,
+            server: context.server || 'https://cad.onshape.com',
+            multilayer: 'true',
+            multi: 'true'
+        });
+
+        const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
+        console.log('Opening BionicsCAM multi-part import:', url);
+        window.open(url, '_blank');
     }
 
     /**
