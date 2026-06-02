@@ -195,6 +195,14 @@
             Select the top face of your part to manufacture
         </div>
 
+        <!-- Multi-part import: shown in 2.5D mode, no face selection needed -->
+        <div id="multiPartGroup" class="button-group" style="display: none;">
+            <button id="importAllParts" class="btn-primary">
+                ⬆ Import all parts
+            </button>
+            <div class="mode-hint" style="margin-top: 4px;">Exports every part as a separate DXF for nesting</div>
+        </div>
+
         <div id="buttonGroup" class="button-group" style="display: none;">
             <button id="sendToBionicsCAM" class="btn-primary" disabled>
                 Send to BionicsCAM
@@ -202,7 +210,6 @@
             <button id="selectAnotherFace" class="btn-secondary">
                 Select another face
             </button>
-            <!-- Drive button removed - doesn't work in embedded iframe context -->
         </div>
     </div>
 
