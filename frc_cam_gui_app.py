@@ -787,6 +787,10 @@ def process_file():
                         quantity = 1
 
                     multi_ok = True
+                    # Seek all streams back to start — uploaded_files[0] (== file) was
+                    # already consumed by the unconditional file.save() above.
+                    for f in uploaded_files:
+                        f.stream.seek(0)
                     for idx, part_file in enumerate(uploaded_files):
                         part_base_name = Path(part_file.filename).stem
                         safe_base_name = re.sub(r'[^\w\-]+', '_', part_base_name).strip('_')
