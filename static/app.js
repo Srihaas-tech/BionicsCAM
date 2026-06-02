@@ -5,6 +5,7 @@
 const appState = {
     // File upload
     uploadedFile: null,
+    uploadedFiles: [],
     suggestedFilename: null,
     gcodeContent: null,
     outputFilename: null,
@@ -451,44 +452,40 @@ document.addEventListener('DOMContentLoaded', () => {
         dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
-            const files = e.dataTransfer.files;
+            const files = Array.from(e.dataTransfer.files || []);
             if (files.length > 0) {
-                handleFile(files[0]);
+                handleFiles(files);
             }
         });
 
         fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                handleFile(e.target.files[0]);
+            const files = Array.from(e.target.files || []);
+            if (files.length > 0) {
+                handleFiles(files);
             }
         });
 
-        function handleFile(file) {
-            if (!file.name.toLowerCase().endsWith('.dxf')) {
-                showError('Invalid file type', 'Please upload a DXF file.');
+        function handleFiles(files) {
+            const validFiles = files.filter((file) => file.name.toLowerCase().endsWith('.dxf'));
+            if (validFiles.length === 0) {
+                showError('Invalid file type', 'Please upload one or more DXF files.');
                 return;
             }
 
             // Store in appState for access across scopes
-            appState.uploadedFile = file;
-            fileName.textContent = file.name;
-            fileSize.textContent = formatFileSize(file.size);
-
-            // Show file loaded card, hide drop zone
-            dropZone.style.display = 'none';
-            fileLoadedCard.style.display = 'block';
-
-            generateBtn.disabled = false;
-            generateBtn.textContent = '🚀 Generate Program';
+            appState.uploadedFiles = validFiles;
+            appState.uploadedFile = validFiles[0];
+            appState.suggestedFilename = null;
+            setSelectedFilesUI(validFiles);
             hideError();
             hideResults();
 
-            // Read DXF file for setup mode
+            // Read the first DXF file for setup mode / preview
             const reader = new FileReader();
             reader.onload = (e) => {
                 parseDxfForSetup(e.target.result);
             };
-            reader.readAsText(file);
+            reader.readAsText(validFiles[0]);
         }
 
         // Handle "Upload a different file" link
@@ -505,19 +502,73 @@ document.addEventListener('DOMContentLoaded', () => {
             return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
         }
 
+        function isMultiFileMode() {
+            return Array.isArray(appState.uploadedFiles) && appState.uploadedFiles.length > 1;
+        }
+
+        function summarizeSelectedFiles(files) {
+            if (!files || files.length === 0) return { title: '', subtitle: '' };
+
+            if (files.length === 1) {
+                return {
+                    title: files[0].name,
+                    subtitle: formatFileSize(files[0].size)
+                };
+            }
+
+            const shown = files.slice(0, 3).map((file) => `${file.name} (${formatFileSize(file.size)})`);
+            if (files.length > 3) {
+                shown.push(`+${files.length - 3} more`);
+            }
+
+            return {
+                title: `${files.length} DXF files selected`,
+                subtitle: shown.join(' • ')
+            };
+        }
+
+        function setSelectedFilesUI(files) {
+            const fileNameEl = document.getElementById('fileName');
+            const fileSizeEl = document.getElementById('fileSize');
+            const fileLoadedCardEl = document.getElementById('fileLoadedCard');
+            const dropZoneEl = document.getElementById('dropZone');
+            const generateBtnEl = document.getElementById('generateBtn');
+
+            const summary = summarizeSelectedFiles(files);
+            if (fileNameEl) fileNameEl.textContent = summary.title;
+            if (fileSizeEl) fileSizeEl.textContent = summary.subtitle;
+
+            if (dropZoneEl) dropZoneEl.style.display = 'none';
+            if (fileLoadedCardEl) fileLoadedCardEl.style.display = 'block';
+
+            if (generateBtnEl) {
+                generateBtnEl.disabled = false;
+                generateBtnEl.textContent = isMultiFileMode() ? '🚀 Generate Combined Layout' : '🚀 Generate Program';
+            }
+
+            updateFormVisibility();
+        }
+
         // Generate G-code
         generateBtn.addEventListener('click', async () => {
             console.log('🔍 Generate button clicked');
             console.log('📂 appState.uploadedFile:', appState.uploadedFile);
+            console.log('📂 appState.uploadedFiles:', appState.uploadedFiles);
 
-            if (!appState.uploadedFile) {
-                console.error('❌ No file in appState.uploadedFile');
+            const filesToUpload = Array.isArray(appState.uploadedFiles) && appState.uploadedFiles.length > 0
+                ? appState.uploadedFiles
+                : (appState.uploadedFile ? [appState.uploadedFile] : []);
+
+            if (filesToUpload.length === 0) {
+                console.error('❌ No file in appState.uploadedFile(s)');
                 return;
             }
 
             const formData = new FormData();
-            formData.append('file', appState.uploadedFile);
-            console.log('✅ FormData created with file:', appState.uploadedFile.name);
+            filesToUpload.forEach((file) => {
+                formData.append('file', file, file.name);
+            });
+            console.log('✅ FormData created with files:', filesToUpload.map((file) => file.name));
 
             const use25d = document.getElementById('use25d')?.checked || false;
             formData.append('use25d', use25d ? 'true' : 'false');
@@ -563,6 +614,7 @@ document.addEventListener('DOMContentLoaded', () => {
             formData.append('quantity', Math.max(1, quantityVal));
             const nestRotationVal = document.getElementById('nestRotation')?.value || 'auto';
             formData.append('nest_rotation', nestRotationVal);
+            formData.append('multi_file_count', String(filesToUpload.length));
             if (appState.suggestedFilename) {
                 formData.append('suggested_filename', appState.suggestedFilename); // Onshape filename
             }
@@ -939,6 +991,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const quantityGroup = document.getElementById('quantityGroup');
             const isAluminumTube = materialSelect.value === 'aluminum_tube';
             const isMultiDepth = isMultiDepthMode();
+            const isMultiFile = isMultiFileMode();
 
             // Hide/show aluminum_tube option based on 2.5D mode
             const tubeOption = Array.from(materialSelect.options).find(opt => opt.value === 'aluminum_tube');
@@ -967,10 +1020,10 @@ document.addEventListener('DOMContentLoaded', () => {
             // Hide tube parameters unless aluminum_tube is selected
             if (tubeParams) {
                 tubeParams.style.display = isAluminumTube ? 'block' : 'none';
-            if (quantityGroup) quantityGroup.style.display = isAluminumTube ? 'none' : 'block';
+            }
+            if (quantityGroup) quantityGroup.style.display = (isAluminumTube || isMultiFile) ? 'none' : 'block';
             const nestRotationGroup = document.getElementById('nestRotationGroup');
             if (nestRotationGroup) nestRotationGroup.style.display = isAluminumTube ? 'none' : 'block';
-            }
         }
 
         /**
@@ -2642,26 +2695,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
                         // Use appState to store file (accessible across scopes)
                         appState.uploadedFile = file;
+                        appState.uploadedFiles = [file];
                         appState.suggestedFilename = onshapeSuggestedFilename || null;
 
                         // Update UI elements
-                        const fileNameEl = document.getElementById('fileName');
-                        const fileSizeEl = document.getElementById('fileSize');
-                        const fileLoadedCardEl = document.getElementById('fileLoadedCard');
-                        const dropZoneEl = document.getElementById('dropZone');
-                        const generateBtnEl = document.getElementById('generateBtn');
-
-                        if (fileNameEl) fileNameEl.textContent = filename;
-                        if (fileSizeEl) fileSizeEl.textContent = formatFileSize(dxfContent.length);
-
-                        // Show file loaded card, hide drop zone
-                        if (dropZoneEl) dropZoneEl.style.display = 'none';
-                        if (fileLoadedCardEl) fileLoadedCardEl.style.display = 'block';
-
-                        if (generateBtnEl) {
-                            generateBtnEl.disabled = false;
-                            generateBtnEl.textContent = '🚀 Generate Program';
-                        }
+                        setSelectedFilesUI([file]);
 
                         // Parse for 2D setup view
                         parseDxfForSetup(dxfContent);
