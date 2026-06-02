@@ -2633,7 +2633,48 @@ document.addEventListener('DOMContentLoaded', () => {
             
             const dxfContentInline = window.ONSHAPE_DATA?.dxfContentInline || null;
 
-            if (dxfFile && fromOnshape) {
+            // ── Multi-part Onshape import ──────────────────────────────────
+            const dxfFiles = window.ONSHAPE_DATA?.dxfFiles || null;
+
+            if (dxfFiles && dxfFiles.length > 0 && fromOnshape) {
+                console.log(`Auto-loading ${dxfFiles.length} DXF(s) from Onshape multi-part import`);
+
+                const files = dxfFiles.map(({ filename, content }) => {
+                    const blob = new Blob([content], { type: 'application/dxf' });
+                    return new File([blob], filename, { type: 'application/dxf' });
+                });
+
+                appState.uploadedFiles = files;
+                appState.uploadedFile = files[0];
+                appState.suggestedFilename = null;
+
+                const fileNameEl = document.getElementById('fileName');
+                const fileSizeEl = document.getElementById('fileSize');
+                const fileLoadedCardEl = document.getElementById('fileLoadedCard');
+                const dropZoneEl = document.getElementById('dropZone');
+                const generateBtnEl = document.getElementById('generateBtn');
+
+                const totalBytes = dxfFiles.reduce((sum, f) => sum + f.content.length, 0);
+                if (fileNameEl) fileNameEl.textContent = `${files.length} files (${dxfFiles.map(f => f.filename).join(', ')})`;
+                if (fileSizeEl) fileSizeEl.textContent = formatFileSize(totalBytes);
+                if (dropZoneEl) dropZoneEl.style.display = 'none';
+                if (fileLoadedCardEl) fileLoadedCardEl.style.display = 'block';
+                if (generateBtnEl) {
+                    generateBtnEl.disabled = false;
+                    generateBtnEl.textContent = '🚀 Generate Program';
+                }
+
+                // Parse first file for 2D setup preview
+                parseDxfForSetup(dxfFiles[0].content);
+
+                const statusDiv = document.getElementById('statusMessage');
+                if (statusDiv) {
+                    statusDiv.textContent = `✅ Imported ${files.length} part(s) from Onshape! Click Generate Program to continue.`;
+                    statusDiv.style.display = 'block';
+                }
+
+            } else if (dxfFile && fromOnshape) {
+            // ── Single-part Onshape import (existing) ─────────────────────
                 console.log('Auto-loading DXF from Onshape:', dxfFile);
 
                 // Use inline DXF content if available (avoids cross-instance 404 on Vercel)
