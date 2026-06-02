@@ -2910,8 +2910,9 @@ class FRCPostProcessor:
 
         if offset_poly.is_empty or offset_poly.area < 0.001:
             center_x, center_y = self._get_polygon_center(pocket_poly)
-            error_msg = f"Pocket at approximately ({center_x:.3f}, {center_y:.3f}) is too small for {self.tool_diameter:.4f}\" tool - tool cannot fit inside with proper clearance"
-            self._add_error(error_msg)
+            warning_msg = f"Skipping tiny pocket at approximately ({center_x:.3f}, {center_y:.3f}); {self.tool_diameter:.4f}\" tool cannot fit with proper clearance"
+            print(f"  ⚠️  WARNING: {warning_msg}")
+            gcode.append(f"(WARNING: {warning_msg})")
             return gcode
 
         # Get the boundary of the offset polygon
@@ -3227,12 +3228,13 @@ class FRCPostProcessor:
 
             if min_groove_width < self.tool_diameter:
                 center_x, center_y = pocket_poly.centroid.x, pocket_poly.centroid.y
-                error_msg = (
-                    f"Groove at approximately ({center_x:.3f}, {center_y:.3f}) "
-                    f"is {min_groove_width:.4f}\" wide, which is too narrow for "
+                warning_msg = (
+                    f"Skipping narrow groove at approximately ({center_x:.3f}, {center_y:.3f}); "
+                    f"groove is {min_groove_width:.4f}\" wide and too narrow for "
                     f"{self.tool_diameter:.4f}\" tool"
                 )
-                self._add_error(error_msg)
+                print(f"  ⚠️  WARNING: {warning_msg}")
+                gcode.append(f"(WARNING: {warning_msg})")
                 return gcode
 
         # Buffer inward (negative buffer) for tool compensation
@@ -3241,8 +3243,9 @@ class FRCPostProcessor:
 
         if offset_poly.is_empty or offset_poly.area < 0.001:
             center_x, center_y = pocket_poly.centroid.x, pocket_poly.centroid.y
-            error_msg = f"Pocket at approximately ({center_x:.3f}, {center_y:.3f}) is too small for {self.tool_diameter:.4f}\" tool - tool cannot fit inside with proper clearance"
-            self._add_error(error_msg)
+            warning_msg = f"Skipping tiny pocket at approximately ({center_x:.3f}, {center_y:.3f}); {self.tool_diameter:.4f}\" tool cannot fit with proper clearance"
+            print(f"  ⚠️  WARNING: {warning_msg}")
+            gcode.append(f"(WARNING: {warning_msg})")
             return gcode
 
         # Check for circular ring - use spiral clearing instead of contour-parallel
