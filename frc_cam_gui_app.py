@@ -77,105 +77,129 @@ def get_jobs(user_id):
         print(f"⚠️ Failed to get jobs: {e}")
         return []
 
-def _sanitize_path_component(value):
-    """Create a filesystem-safe filename component."""
-    cleaned = re.sub(r'[^A-Za-z0-9._-]+', '_', str(value or '').strip())
-    cleaned = re.sub(r'_+', '_', cleaned).strip('._-')
-    return cleaned or 'part'
 
-
-def _build_combined_base_name(files, suggested_filename=None):
-    """Build a readable base filename for multi-file jobs."""
-    if suggested_filename and len(files) == 1:
-        return _sanitize_path_component(suggested_filename)
-
-    stems = []
-    for file_storage in files:
-        stem = Path(getattr(file_storage, 'filename', '') or '').stem
-        if stem:
-            stems.append(_sanitize_path_component(stem))
-
-    if not stems:
-        return 'combined_parts'
-    if len(stems) == 1:
-        return stems[0]
-
-    combined = '_'.join(stems[:3])
-    if len(stems) > 3:
-        combined += f'_plus_{len(stems) - 3}_more'
-    return _sanitize_path_component(f'combined_{combined}')
-
-
-def _format_timestamp_for_filename(timestamp_str):
-    """Return a readable timestamp for filenames."""
-    if not timestamp_str:
-        timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    return timestamp_str.replace(' ', '_').replace(':', '-')
-
-
-def _process_standard_dxf_file(
-    file_storage,
-    *,
+def process_standard_dxf_file(
+    input_path,
     material,
     machine_id,
+    thickness,
     tool_diameter,
     origin_corner,
     rotation,
     use_25d,
-    thickness,
     tab_spacing,
     team_config,
+    user_name,
     suggested_filename,
     timestamp_str,
 ):
-    """Process one standard plate DXF and return metadata for nesting."""
-    temp_input = tempfile.NamedTemporaryFile(delete=False, suffix='.dxf', dir=UPLOAD_FOLDER)
-    temp_input_path = temp_input.name
-    temp_input.close()
+    """Process a single standard DXF into G-code."""
+    pp = FRCPostProcessor(
+        material_thickness=thickness,
+        tool_diameter=tool_diameter,
+        units='inch',
+        config=team_config
+    )
+    pp.use_25d = use_25d
+    pp.apply_material_preset(material, machine_id)
 
-    try:
-        file_storage.save(temp_input_path)
+    if user_name:
+        pp.user_name = user_name
 
-        base_name = _sanitize_path_component(suggested_filename or Path(file_storage.filename).stem or 'output')
+    pp.tab_spacing = tab_spacing
+    pp.load_dxf(input_path)
+    pp.transform_coordinates(origin_corner, rotation)
+    pp.identify_perimeter_and_pockets()
+    pp.classify_holes()
 
-        pp = FRCPostProcessor(
-            material_thickness=thickness,
-            tool_diameter=tool_diameter,
-            units='inch',
-            config=team_config
-        )
-        pp.use_25d = use_25d
-        pp.apply_material_preset(material, machine_id)
+    result = pp.generate_gcode(suggested_filename=suggested_filename, timestamp=timestamp_str)
+    return pp, result
 
-        user_name = session.get('user_name')
-        if user_name:
-            pp.user_name = user_name
 
-        pp.tab_spacing = tab_spacing
-        pp.load_dxf(temp_input_path)
-        pp.transform_coordinates(origin_corner, rotation)
-        pp.identify_perimeter_and_pockets()
-        pp.classify_holes()
+def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, timestamp_str):
+    """Place multiple independently generated parts side-by-side on the sheet."""
+    if not parts:
+        raise ValueError('No parts to combine')
 
-        result = pp.generate_gcode(suggested_filename=base_name, timestamp=timestamp_str)
-        part_w, part_h = pp.get_part_bounds()
+    def choose_rotation(part):
+        if nest_rotation == '90':
+            return True
+        if nest_rotation == '0':
+            return False
+        # Auto: rotate if it makes the part narrower for side-by-side layout
+        return part['part_h'] < part['part_w']
 
-        return {
-            'base_name': base_name,
-            'source_name': file_storage.filename,
-            'result': result,
-            'pp': pp,
-            'part_w': part_w,
-            'part_h': part_h,
-            'temp_input_path': temp_input_path,
-        }
-    finally:
-        try:
-            os.unlink(temp_input_path)
-        except Exception:
+    def extract_toolpath(gcode_str):
+        lines = gcode_str.splitlines()
+        start = next((i for i, l in enumerate(lines)
+                      if l.strip() and not l.strip().startswith('(')
+                      and any(c in l for c in ('G0 ', 'G1 ', 'G2 ', 'G3 ',
+                                                'G00', 'G01', 'G02', 'G03',
+                                                'M3', 'M03'))), 0)
+        end = next((i for i, l in enumerate(lines)
+                    if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
+        return '\n'.join(lines[start:end])
+
+    placements = []
+    x_cursor = 0.0
+    y_cursor = 0.0
+    row_height = 0.0
+    max_x_used = 0.0
+
+    for idx, part in enumerate(parts):
+        do_rotate = choose_rotation(part)
+        if do_rotate:
+            slot_w, slot_h = part['part_h'], part['part_w']
+            gcode = FRCPostProcessor.rotate_gcode_90(part['result'].gcode, part['part_w'], part['part_h'])
+            rot_label = '90°'
+        else:
+            slot_w, slot_h = part['part_w'], part['part_h']
+            gcode = part['result'].gcode
+            rot_label = '0°'
+
+        if x_cursor > 0 and (x_cursor + slot_w) > stock_x:
+            x_cursor = 0.0
+            y_cursor += row_height + gap
+            row_height = 0.0
+
+        if (x_cursor + slot_w) > stock_x and x_cursor == 0.0 and idx == 0:
+            # First part is simply too large for the stock; let it through but warn later.
             pass
 
+        if (y_cursor + slot_h) > stock_y:
+            raise ValueError(
+                f'Not enough stock space for part {idx + 1}: needed {(slot_w):.3f}\" x {(slot_h):.3f}\", '
+                f'but only {(stock_x - x_cursor):.3f}\" x {(stock_y - y_cursor):.3f}\" remained.'
+            )
 
+        placements.append({
+            'index': idx,
+            'source_name': part['source_name'],
+            'gcode': gcode,
+            'x': x_cursor,
+            'y': y_cursor,
+            'slot_w': slot_w,
+            'slot_h': slot_h,
+            'rotation_label': rot_label,
+        })
+
+        max_x_used = max(max_x_used, x_cursor + slot_w)
+        x_cursor += slot_w + gap
+        row_height = max(row_height, slot_h)
+
+    combined_blocks = []
+    for placement in placements:
+        shifted = FRCPostProcessor.offset_gcode(placement['gcode'], dx=placement['x'], dy=placement['y'])
+        if placement['index'] == 0:
+            combined_blocks.append(shifted)
+        else:
+            combined_blocks.append(
+                f"( --- Part {placement['index'] + 1}: {placement['source_name']} X+{placement['x']:.3f}\" Y+{placement['y']:.3f}\" rot={placement['rotation_label']} --- )"
+            )
+            combined_blocks.append(extract_toolpath(shifted))
+
+    combined_gcode = '\n'.join(combined_blocks)
+    return combined_gcode, placements, max_x_used, y_cursor + row_height
 import atexit
 import time
 import threading
@@ -595,19 +619,19 @@ def process_file():
     """Process uploaded DXF file and generate G-code"""
     try:
         # Get uploaded file(s)
-        uploaded_files = [f for f in request.files.getlist('file') if f and f.filename]
-        if not uploaded_files and 'files' in request.files:
-            uploaded_files = [f for f in request.files.getlist('files') if f and f.filename]
-
+        uploaded_files = [f for f in request.files.getlist('files') if f and f.filename]
         if not uploaded_files:
-            return jsonify({'error': 'No file uploaded'}), 400
+            if 'file' not in request.files:
+                return jsonify({'error': 'No file uploaded'}), 400
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({'error': 'No file selected'}), 400
+            uploaded_files = [file]
+        else:
+            file = uploaded_files[0]
 
-        for uploaded_file in uploaded_files:
-            if not uploaded_file.filename.lower().endswith('.dxf'):
-                return jsonify({'error': f'File must be a DXF file: {uploaded_file.filename}'}), 400
-
-        file = uploaded_files[0]
-        multi_file_upload = len(uploaded_files) > 1
+        if any(not f.filename.lower().endswith('.dxf') for f in uploaded_files):
+            return jsonify({'error': 'All uploaded files must be DXF files'}), 400
 
         # Get parameters
         material = request.form.get('material', 'plywood')
@@ -638,12 +662,6 @@ def process_file():
         # Material-specific parameters
         thickness = float(request.form.get('thickness', 0.25))  # Material/wall thickness (used by both modes)
 
-        # Get team config from session (needed for both single-file and multi-file layout)
-        config_data = session.get('team_config_data', {})
-        team_config = TeamConfig.from_dict(config_data)
-        log(f"📋 Using team config: {team_config}")
-        log(f"🔍 DEBUG: TeamConfig internals: team={team_config.team_number}, name={team_config.team_name}")
-
         if is_aluminum_tube:
             # Tube mode parameters
             tube_height = float(request.form.get('tube_height', 1.0))
@@ -652,252 +670,6 @@ def process_file():
         else:
             # Standard mode parameters
             tab_spacing = float(request.form.get('tab_spacing', 6.0))
-
-        # Multi-file side-by-side layout (standard plate mode only)
-        if multi_file_upload:
-            if is_aluminum_tube:
-                return jsonify({
-                    'error': 'Multi-file side-by-side layout is not supported in aluminum tube mode yet.'
-                }), 400
-
-            def extract_toolpath(gcode_str):
-                lines = gcode_str.splitlines()
-                start = next((i for i, l in enumerate(lines)
-                              if l.strip() and not l.strip().startswith('(')
-                              and any(c in l for c in ('G0 ', 'G1 ', 'G2 ', 'G3 ',
-                                                        'G00', 'G01', 'G02', 'G03',
-                                                        'M3', 'M03'))), 0)
-                end = next((i for i, l in enumerate(lines)
-                            if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
-                return '\n'.join(lines[start:end])
-
-            def strip_program_end(gcode_str):
-                lines = gcode_str.splitlines()
-                while lines and lines[-1].strip() in ('M30', 'M2', 'M02'):
-                    lines.pop()
-                return '\n'.join(lines)
-
-            def choose_orientation(part_w, part_h, stock_x, stock_y, gap, rotation_mode):
-                options = [
-                    ('0°', part_w, part_h, False),
-                    ('90°', part_h, part_w, True),
-                ]
-                if rotation_mode == '0':
-                    return options[0]
-                if rotation_mode == '90':
-                    return options[1]
-
-                fits = [opt for opt in options if opt[1] <= stock_x and opt[2] <= stock_y]
-                if not fits:
-                    return None
-
-                # Prefer the orientation that uses less width, then less height.
-                fits.sort(key=lambda opt: (opt[1] + gap, opt[2]))
-                return fits[0]
-
-            part_jobs = []
-            for idx, uploaded_file in enumerate(uploaded_files, 1):
-                log(f"📄 Processing multi-file part {idx}/{len(uploaded_files)}: {uploaded_file.filename}")
-                job = _process_standard_dxf_file(
-                    uploaded_file,
-                    material=material,
-                    machine_id=machine_id,
-                    tool_diameter=tool_diameter,
-                    origin_corner=origin_corner,
-                    rotation=rotation,
-                    use_25d=use_25d,
-                    thickness=thickness,
-                    tab_spacing=tab_spacing,
-                    team_config=team_config,
-                    suggested_filename='',
-                    timestamp_str=timestamp_str,
-                )
-                if not job['result'].success:
-                    log(f"❌ Multi-file processing failed for {uploaded_file.filename}")
-                    for error in job['result'].errors:
-                        log(f"   Error: {error}")
-                    return jsonify({
-                        'error': f'Failed to process {uploaded_file.filename}',
-                        'details': '\n'.join(job['result'].errors)
-                    }), 500
-                part_jobs.append(job)
-
-            stock_x = team_config.machine_x_max
-            stock_y = team_config.machine_y_max
-            gap = tool_diameter
-            nest_rotation_mode = nest_rotation
-
-            placements = []
-            cursor_x = 0.0
-            cursor_y = 0.0
-            row_height = 0.0
-            max_row_right = 0.0
-
-            for job in part_jobs:
-                part_w = job['part_w']
-                part_h = job['part_h']
-                orientation = choose_orientation(part_w, part_h, stock_x, stock_y, gap, nest_rotation_mode)
-                if orientation is None:
-                    return jsonify({
-                        'error': 'One of the uploaded DXFs does not fit on the selected stock sheet',
-                        'details': f"{job['source_name']} is larger than the sheet in both orientations."
-                    }), 400
-
-                rotation_label, slot_w, slot_h, rotated = orientation
-
-                if cursor_x > 0 and cursor_x + slot_w > stock_x:
-                    cursor_y += row_height + gap
-                    cursor_x = 0.0
-                    row_height = 0.0
-
-                if cursor_y + slot_h > stock_y:
-                    return jsonify({
-                        'error': 'Uploaded DXFs do not fit on the selected stock sheet',
-                        'details': f"Combined layout exceeds machine bounds after placing {job['source_name']}."
-                    }), 400
-
-                placements.append({
-                    'dx': cursor_x,
-                    'dy': cursor_y,
-                    'rotation_label': rotation_label,
-                    'rotated': rotated,
-                    'slot_w': slot_w,
-                    'slot_h': slot_h,
-                })
-
-                max_row_right = max(max_row_right, cursor_x + slot_w)
-                cursor_x += slot_w + gap
-                row_height = max(row_height, slot_h)
-
-            combined_blocks = []
-            all_warnings = []
-            total_holes = 0
-            total_pockets = 0
-            total_lines = 0
-            row_count = 1 if part_jobs else 0
-            row_breaks = []
-            current_row_y = 0.0
-            current_row_max_h = 0.0
-            last_row_y = 0.0
-
-            for idx, (job, placement) in enumerate(zip(part_jobs, placements), 1):
-                result = job['result']
-                shifted = FRCPostProcessor.offset_gcode(result.gcode, dx=placement['dx'], dy=placement['dy'])
-                if idx == 1:
-                    combined_blocks.append(strip_program_end(shifted))
-                else:
-                    combined_blocks.append(
-                        f"( --- Part {idx}: {job['source_name']} @ X+{placement['dx']:.3f}\" Y+{placement['dy']:.3f}\" rot={placement['rotation_label']} --- )"
-                    )
-                    combined_blocks.append(extract_toolpath(shifted))
-
-                all_warnings.extend(result.warnings or [])
-                total_holes += result.stats.get('num_holes', 0)
-                total_pockets += result.stats.get('num_pockets', 0)
-                total_lines += result.stats.get('total_lines', 0)
-
-                if placement['dy'] != last_row_y and idx > 1:
-                    row_count += 1
-                    last_row_y = placement['dy']
-
-            combined_blocks.append('M30')
-            combined_gcode = '\n'.join(combined_blocks)
-            combined_base_name = _build_combined_base_name(uploaded_files, suggested_filename)
-            combined_timestamp = _format_timestamp_for_filename(timestamp_str)
-            combined_filename = f"{combined_base_name}_{combined_timestamp}.nc"
-
-            combined_result = PostProcessorResult(
-                success=True,
-                gcode=combined_gcode,
-                filename=combined_filename,
-                warnings=all_warnings,
-                stats={
-                    'quantity': len(part_jobs),
-                    'nesting_cols': len(part_jobs),
-                    'nesting_rows': row_count,
-                    'nesting_rotation': nest_rotation_mode,
-                    'num_holes': total_holes,
-                    'num_pockets': total_pockets,
-                    'total_lines': len(combined_gcode.splitlines()),
-                }
-            )
-
-            output_path = os.path.join(OUTPUT_FOLDER, combined_filename)
-            with open(output_path, 'w') as f:
-                f.write(combined_result.gcode)
-
-            log(f"✅ Combined output file created: {os.path.getsize(output_path)} bytes")
-            log(f"📄 Combined output file: {output_path}")
-
-            actual_filename = combined_filename
-            output_token = file_token_manager.register_file(output_path, actual_filename)
-
-            console_lines = []
-            console_lines.append(f"Nesting {len(part_jobs)} DXF files side by side")
-            for idx, (job, placement) in enumerate(zip(part_jobs, placements), 1):
-                console_lines.append(
-                    f"  Part {idx}: {job['source_name']} -> X+{placement['dx']:.3f}\" Y+{placement['dy']:.3f}\" rot={placement['rotation_label']}"
-                )
-            console_lines.append(f"Total lines: {combined_result.stats.get('total_lines', 0)}")
-            console_output = '\n'.join(console_lines)
-
-            parameters = {
-                'thickness': thickness,
-                'tool_diameter': tool_diameter,
-                'origin_corner': origin_corner,
-                'rotation': rotation,
-                'nest_rotation': nest_rotation_mode,
-                'multi_file_count': len(part_jobs),
-            }
-            if is_aluminum_tube:
-                parameters.update({
-                    'tube_height': tube_height,
-                    'square_end': square_end,
-                    'cut_to_length': cut_to_length
-                })
-            else:
-                parameters.update({
-                    'tab_spacing': tab_spacing
-                })
-
-            response_data = {
-                'success': True,
-                'filename': output_token,
-                'real_filename': actual_filename,
-                'gcode': combined_result.gcode,
-                'console': console_output,
-                'parameters': parameters
-            }
-
-            metrics.log_event('gcode_generated',
-                             team_number=session.get('team_number'),
-                             user_email=session.get('user_email'),
-                             metadata={
-                                 'material': material,
-                                 'is_tube': is_aluminum_tube,
-                                 'from_onshape': request.form.get('fromOnshape', 'false') == 'true',
-                                 'multi_file_count': len(part_jobs)
-                             })
-
-            user_id = session.get('user_email') or session.get('user_id') or request.remote_addr
-            save_job(user_id, {
-                'part_name': combined_base_name,
-                'filename': actual_filename,
-                'material': material,
-                'machine_id': machine_id or 'default',
-                'thickness': thickness,
-                'gcode_lines': combined_result.stats.get('total_lines', 0),
-                'holes': combined_result.stats.get('num_holes', 0),
-                'pockets': combined_result.stats.get('num_pockets', 0),
-                'cycle_time': combined_result.stats.get('cycle_time_display', 'N/A'),
-                'cycle_time_seconds': combined_result.stats.get('cycle_time_seconds', 0),
-                'from_onshape': request.form.get('fromOnshape', 'false') == 'true',
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'gcode': combined_result.gcode,
-                'source_files': [job['source_name'] for job in part_jobs],
-            })
-
-            return jsonify(response_data)
 
         # Save uploaded file
         input_path = os.path.join(UPLOAD_FOLDER, 'input.dxf')
@@ -958,6 +730,14 @@ def process_file():
 
         log(f"🚀 Running post-processor API...")
 
+        # Get team config from session (if available)
+        config_data = session.get('team_config_data', {})
+        log(f"🔍 DEBUG: Session team_config_data keys: {list(config_data.keys()) if config_data else 'EMPTY'}")
+        log(f"🔍 DEBUG: Session has {len(config_data)} top-level keys in team_config_data")
+        team_config = TeamConfig.from_dict(config_data)
+        log(f"📋 Using team config: {team_config}")
+        log(f"🔍 DEBUG: TeamConfig internals: team={team_config.team_number}, name={team_config.team_name}")
+
         # Call post-processor API based on mode
         try:
             if is_aluminum_tube:
@@ -998,119 +778,194 @@ def process_file():
                 )
             else:
                 # Standard mode - use standard API
-                pp = FRCPostProcessor(
-                    material_thickness=thickness,
-                    tool_diameter=tool_diameter,
-                    units='inch',
-                    config=team_config
-                )
-                pp.use_25d = use_25d
-                # Apply material preset (for specific machine if selected)
-                pp.apply_material_preset(material, machine_id)
-
-                # Add user name if authenticated
                 user_name = session.get('user_name')
-                if user_name:
-                    pp.user_name = user_name
+                standard_parts = []
 
-                # Standard mode specific parameters
-                pp.tab_spacing = tab_spacing
+                if len(uploaded_files) > 1:
+                    if quantity > 1:
+                        log("⚠️ Multiple DXFs selected; quantity is ignored and each DXF is placed once.")
+                        quantity = 1
 
-                # Load and process DXF
-                pp.load_dxf(input_path)
-                pp.transform_coordinates(origin_corner, rotation)
-                pp.identify_perimeter_and_pockets()  # Must come BEFORE classify_holes to remove perimeter circles
-                pp.classify_holes()
+                    multi_ok = True
+                    for idx, part_file in enumerate(uploaded_files):
+                        part_base_name = Path(part_file.filename).stem
+                        part_input_path = os.path.join(UPLOAD_FOLDER, f"input_{uuid.uuid4().hex}_{part_base_name}.dxf")
+                        part_file.save(part_input_path)
+                        log(f"📝 Processing DXF part {idx + 1}/{len(uploaded_files)}: {part_base_name}")
 
-                # Generate G-code using API
-                result = pp.generate_gcode(suggested_filename=base_name, timestamp=timestamp_str)
-
-                # --- Nesting: repeat the part N times across the stock sheet ---
-                if quantity > 1 and result.success:
-                    part_w, part_h = pp.get_part_bounds()
-                    gap = pp.tool_diameter  # minimum clearance between parts
-                    stock_x = pp.config.machine_x_max
-                    stock_y = pp.config.machine_y_max
-
-                    # Determine whether to rotate 90°
-                    # Normal layout:  each slot is part_w × part_h
-                    # Rotated layout: each slot is part_h × part_w  (dimensions swap)
-                    def fits(pw, ph):
-                        c = max(1, int(stock_x / (pw + gap)))
-                        r = max(1, int(stock_y / (ph + gap)))
-                        return c, r, c * r
-
-                    cols_0, rows_0, max_0 = fits(part_w, part_h)
-                    cols_90, rows_90, max_90 = fits(part_h, part_w)
-
-                    if nest_rotation == '90':
-                        do_rotate = True
-                    elif nest_rotation == '0':
-                        do_rotate = False
-                    else:  # 'auto' — pick whichever packs more parts
-                        do_rotate = (max_90 > max_0)
-
-                    if do_rotate:
-                        base_gcode = FRCPostProcessor.rotate_gcode_90(result.gcode, part_w, part_h)
-                        slot_w, slot_h = part_h, part_w   # dimensions after rotation
-                        cols, rows, max_parts = cols_90, rows_90, max_90
-                        rotation_label = '90°'
-                    else:
-                        base_gcode = result.gcode
-                        slot_w, slot_h = part_w, part_h
-                        cols, rows, max_parts = cols_0, rows_0, max_0
-                        rotation_label = '0°'
-
-                    step_x = slot_w + gap
-                    step_y = slot_h + gap
-
-                    if quantity > max_parts:
-                        result.warnings.append(
-                            f"Requested {quantity} parts but only {max_parts} fit on "
-                            f"{stock_x:.1f}\" x {stock_y:.1f}\" stock "
-                            f"({cols} cols x {rows} rows, rotation={rotation_label}). "
-                            f"Generating {max_parts}."
+                        pp, part_result = process_standard_dxf_file(
+                            input_path=part_input_path,
+                            material=material,
+                            machine_id=machine_id,
+                            thickness=thickness,
+                            tool_diameter=tool_diameter,
+                            origin_corner=origin_corner,
+                            rotation=rotation,
+                            use_25d=use_25d,
+                            tab_spacing=tab_spacing,
+                            team_config=team_config,
+                            user_name=user_name,
+                            suggested_filename=part_base_name,
+                            timestamp_str=timestamp_str,
                         )
-                        quantity = max_parts
 
-                    # Build combined G-code: full file for copy 1, toolpath-only for the rest
-                    def extract_toolpath(gcode_str):
-                        lines = gcode_str.splitlines()
-                        start = next((i for i, l in enumerate(lines)
-                                      if l.strip() and not l.strip().startswith('(')
-                                      and any(c in l for c in ('G0 ', 'G1 ', 'G2 ', 'G3 ',
-                                                                'G00', 'G01', 'G02', 'G03',
-                                                                'M3', 'M03'))), 0)
-                        end = next((i for i, l in enumerate(lines)
-                                    if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
-                        return '\n'.join(lines[start:end])
-
-                    combined_blocks = []
-                    copy_num = 0
-                    done = False
-                    for row in range(rows):
-                        if done:
+                        if not part_result.success:
+                            result = part_result
+                            multi_ok = False
                             break
-                        for col in range(cols):
-                            if copy_num >= quantity:
-                                done = True
-                                break
-                            dx = col * step_x
-                            dy = row * step_y
-                            shifted = FRCPostProcessor.offset_gcode(base_gcode, dx=dx, dy=dy)
-                            if copy_num == 0:
-                                combined_blocks.append(shifted)
-                            else:
-                                combined_blocks.append(
-                                    f"( --- Copy {copy_num + 1}: X+{dx:.3f}\" Y+{dy:.3f}\" rot={rotation_label} --- )")
-                                combined_blocks.append(extract_toolpath(shifted))
-                            copy_num += 1
 
-                    result.gcode = '\n'.join(combined_blocks)
-                    result.stats['quantity'] = quantity
-                    result.stats['nesting_cols'] = cols
-                    result.stats['nesting_rows'] = rows
-                    result.stats['nesting_rotation'] = rotation_label
+                        part_w, part_h = pp.get_part_bounds()
+                        standard_parts.append({
+                            'pp': pp,
+                            'result': part_result,
+                            'part_w': part_w,
+                            'part_h': part_h,
+                            'source_name': part_file.filename,
+                            'base_name': part_base_name,
+                        })
+
+                    if multi_ok and standard_parts:
+                        result = standard_parts[0]['result']
+                        stock_x = standard_parts[0]['pp'].config.machine_x_max
+                        stock_y = standard_parts[0]['pp'].config.machine_y_max
+                        gap = tool_diameter
+
+                        try:
+                            combined_gcode, placements, used_w, used_h = combine_multi_dxf_results(
+                                standard_parts,
+                                stock_x=stock_x,
+                                stock_y=stock_y,
+                                gap=gap,
+                                nest_rotation=nest_rotation,
+                                timestamp_str=timestamp_str,
+                            )
+                        except Exception as combine_error:
+                            result = PostProcessorResult(
+                                success=False,
+                                errors=[str(combine_error)],
+                                warnings=[f"Failed to place multiple DXFs: {combine_error}"],
+                            )
+                        else:
+                            result.gcode = combined_gcode
+                            combined_base = re.sub(r'[^\w\-]+', '_', Path(standard_parts[0]['base_name']).stem).strip('_') or 'Combined_DXF'
+                            safe_timestamp = timestamp_str.replace(' ', '_').replace(':', '-').replace('/', '-') if timestamp_str else datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                            result.filename = f"{combined_base}_combined_{safe_timestamp}.nc"
+                            combined_warnings = []
+                            for part in standard_parts:
+                                combined_warnings.extend(part['result'].warnings)
+                            result.warnings = combined_warnings
+                            result.stats['quantity'] = len(standard_parts)
+                            result.stats['multi_dxf'] = True
+                            result.stats['multi_dxf_parts'] = [part['source_name'] for part in standard_parts]
+                            result.stats['nesting_cols'] = len(placements)
+                            result.stats['nesting_rows'] = 1 if placements else 0
+                            result.stats['nesting_rotation'] = nest_rotation if nest_rotation != 'auto' else 'mixed'
+                            result.stats['combined_width'] = used_w
+                            result.stats['combined_height'] = used_h
+                else:
+                    # Existing single-file standard API path
+                    pp = FRCPostProcessor(
+                        material_thickness=thickness,
+                        tool_diameter=tool_diameter,
+                        units='inch',
+                        config=team_config
+                    )
+                    pp.use_25d = use_25d
+                    pp.apply_material_preset(material, machine_id)
+
+                    if user_name:
+                        pp.user_name = user_name
+
+                    pp.tab_spacing = tab_spacing
+                    pp.load_dxf(input_path)
+                    pp.transform_coordinates(origin_corner, rotation)
+                    pp.identify_perimeter_and_pockets()  # Must come BEFORE classify_holes to remove perimeter circles
+                    pp.classify_holes()
+
+                    result = pp.generate_gcode(suggested_filename=base_name, timestamp=timestamp_str)
+
+                    if quantity > 1 and result.success:
+                        part_w, part_h = pp.get_part_bounds()
+                        gap = pp.tool_diameter
+                        stock_x = pp.config.machine_x_max
+                        stock_y = pp.config.machine_y_max
+
+                        def fits(pw, ph):
+                            c = max(1, int(stock_x / (pw + gap)))
+                            r = max(1, int(stock_y / (ph + gap)))
+                            return c, r, c * r
+
+                        cols_0, rows_0, max_0 = fits(part_w, part_h)
+                        cols_90, rows_90, max_90 = fits(part_h, part_w)
+
+                        if nest_rotation == '90':
+                            do_rotate = True
+                        elif nest_rotation == '0':
+                            do_rotate = False
+                        else:
+                            do_rotate = (max_90 > max_0)
+
+                        if do_rotate:
+                            base_gcode = FRCPostProcessor.rotate_gcode_90(result.gcode, part_w, part_h)
+                            slot_w, slot_h = part_h, part_w
+                            cols, rows, max_parts = cols_90, rows_90, max_90
+                            rotation_label = '90°'
+                        else:
+                            base_gcode = result.gcode
+                            slot_w, slot_h = part_w, part_h
+                            cols, rows, max_parts = cols_0, rows_0, max_0
+                            rotation_label = '0°'
+
+                        step_x = slot_w + gap
+                        step_y = slot_h + gap
+
+                        if quantity > max_parts:
+                            result.warnings.append(
+                                f"Requested {quantity} parts but only {max_parts} fit on "
+                                f"{stock_x:.1f}\" x {stock_y:.1f}\" stock "
+                                f"({cols} cols x {rows} rows, rotation={rotation_label}). "
+                                f"Generating {max_parts}."
+                            )
+                            quantity = max_parts
+
+                        def extract_toolpath(gcode_str):
+                            lines = gcode_str.splitlines()
+                            start = next((i for i, l in enumerate(lines)
+                                          if l.strip() and not l.strip().startswith('(')
+                                          and any(c in l for c in ('G0 ', 'G1 ', 'G2 ', 'G3 ',
+                                                                    'G00', 'G01', 'G02', 'G03',
+                                                                    'M3', 'M03'))), 0)
+                            end = next((i for i, l in enumerate(lines)
+                                        if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
+                            return '\n'.join(lines[start:end])
+
+                        combined_blocks = []
+                        copy_num = 0
+                        done = False
+                        for row in range(rows):
+                            if done:
+                                break
+                            for col in range(cols):
+                                if copy_num >= quantity:
+                                    done = True
+                                    break
+                                dx = col * step_x
+                                dy = row * step_y
+                                shifted = FRCPostProcessor.offset_gcode(base_gcode, dx=dx, dy=dy)
+                                if copy_num == 0:
+                                    combined_blocks.append(shifted)
+                                else:
+                                    combined_blocks.append(
+                                        f"( --- Copy {copy_num + 1}: X+{dx:.3f}\" Y+{dy:.3f}\" rot={rotation_label} --- )")
+                                    combined_blocks.append(extract_toolpath(shifted))
+                                copy_num += 1
+
+                        result.gcode = '\n'.join(combined_blocks)
+                        result.stats['quantity'] = quantity
+                        result.stats['nesting_cols'] = cols
+                        result.stats['nesting_rows'] = rows
+                        result.stats['nesting_rotation'] = rotation_label
+
 
             if not result.success:
                 log(f"❌ Post-processor API failed!")
