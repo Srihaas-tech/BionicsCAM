@@ -1974,19 +1974,21 @@ class OnshapeClient:
             log(f"Error parsing Onshape URL: {e}")
             return None
 
-    def export_all_parts_as_dxfs(self, document_id, workspace_id, element_id):
+    def export_all_parts_as_dxfs(self, document_id, workspace_id, element_id, multilayer=True):
         """
-        Export every body in a Part Studio as a separate multilayer DXF.
+        Export every body in a Part Studio as a separate DXF.
 
-        Used for multi-file 2.5D imports so each part becomes its own DXF
-        that can be nested independently on the CNC sheet.
+        Used for multi-file Onshape imports so each part becomes its own DXF
+        that can be nested independently on the CNC sheet. If multilayer=True,
+        each body is exported as a layered 2.5D DXF; if that fails, it falls
+        back to a flat face DXF so one bad body does not kill the batch.
 
         Returns:
             List of dicts: [{'content': bytes, 'filename': str, 'body_id': str}, ...]
             Returns an empty list if no bodies are found or all exports fail.
         """
         log(f"\n{'='*70}")
-        log(f"MULTI-PART EXPORT: all bodies → individual DXFs")
+        log(f"MULTI-PART EXPORT: all bodies -> individual DXFs ({'2.5D' if multilayer else '2D'})")
         log(f"{'='*70}")
 
         # Fetch faces data once; reused for every body to avoid redundant API calls
@@ -2035,24 +2037,41 @@ class OnshapeClient:
                             reference_origin = surface.get('origin', reference_origin)
                             break
 
-                # Export multilayer DXF for this body only
-                export_result = self.export_multilayer_dxf(
-                    document_id, workspace_id, element_id,
-                    reference_face_id=face_id,
-                    reference_body_id=bid,
-                    reference_normal=face_normal,
-                    reference_origin=reference_origin,
-                    body_id=bid,
-                    cached_faces_data=faces_data
-                )
+                dxf_content = None
 
-                if isinstance(export_result, tuple):
-                    dxf_content, _ = export_result
-                else:
-                    dxf_content = export_result
+                if multilayer:
+                    # Export layered 2.5D DXF for this body only. If this body
+                    # has weird geometry, fall back to a flat face export so the
+                    # rest of the batch still imports.
+                    try:
+                        export_result = self.export_multilayer_dxf(
+                            document_id, workspace_id, element_id,
+                            reference_face_id=face_id,
+                            reference_body_id=bid,
+                            reference_normal=face_normal,
+                            reference_origin=reference_origin,
+                            body_id=bid,
+                            cached_faces_data=faces_data
+                        )
+
+                        if isinstance(export_result, tuple):
+                            dxf_content, _ = export_result
+                        else:
+                            dxf_content = export_result
+                    except Exception as multilayer_error:
+                        log(f"⚠️  2.5D export failed for body {bid}; falling back to 2D: {multilayer_error}")
+                        dxf_content = None
 
                 if not dxf_content:
-                    log(f"⚠️  export_multilayer_dxf returned nothing for body {bid} – skipping")
+                    dxf_content = self.export_face_to_dxf(
+                        document_id, workspace_id, element_id,
+                        face_id=face_id,
+                        body_id=bid,
+                        face_normal=face_normal
+                    )
+
+                if not dxf_content:
+                    log(f"⚠️  DXF export returned nothing for body {bid} – skipping")
                     continue
 
                 safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or bid
