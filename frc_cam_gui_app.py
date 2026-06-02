@@ -1774,6 +1774,56 @@ def onshape_import():
             log(f"📚 Document company: {team_name}")
             session['team_name'] = team_name
 
+        # ── MULTI-PART IMPORT – early exit before face auto-selection ──────
+        # ?multi=true → export every body as its own DXF; skip single-part flow.
+        multi_parts = raw_params.get('multi', 'false').lower() in ('true', '1', 'yes')
+        if multi_parts:
+            log("\U0001f5c2\ufe0f  Multi-part import requested – exporting all bodies as separate DXFs")
+            part_exports = client.export_all_parts_as_dxfs(document_id, workspace_id, element_id)
+
+            if not part_exports:
+                return jsonify({'error': 'No parts could be exported from this document'}), 500
+
+            dxf_files_inline = []
+            for part in part_exports:
+                raw = part['content']
+                text = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
+                dxf_files_inline.append({'filename': part['filename'], 'content': text})
+
+            log(f"\u2705 Multi-part export: {len(dxf_files_inline)} DXF(s) ready")
+            session_manager.update_session_tokens(client)
+
+            team_config_data = session.get('team_config_data', {})
+            team_config = TeamConfig(team_config_data)
+            machines = team_config.get_available_machines()
+            current_machine_id = session.get('machine_id', team_config.default_machine_id)
+            team_config_dict = team_config.to_dict(current_machine_id)
+            drive_enabled = team_config_dict.get('google_drive_enabled', False)
+            machine_x_max = team_config_dict.get('machine_x_max', 48.0)
+            machine_y_max = team_config_dict.get('machine_y_max', 96.0)
+            default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
+            available_materials = team_config.get_available_materials(current_machine_id)
+            available_materials['aluminum_tube'] = {
+                **available_materials.get('aluminum', {}), 'name': 'Aluminum Tube'
+            }
+            incomplete_materials = {
+                mid for mid in available_materials
+                if not team_config.is_material_complete(mid, current_machine_id) and mid != 'aluminum_tube'
+            }
+
+            return render_template('index.html',
+                                 dxf_file='', dxf_content_inline=None,
+                                 dxf_files_inline=dxf_files_inline,
+                                 from_onshape=True, document_id=document_id,
+                                 face_id='', suggested_filename='', detected_thickness=None,
+                                 user_name=session.get('user_name'), team_name=session.get('team_name'),
+                                 drive_enabled=drive_enabled, machine_x_max=machine_x_max,
+                                 machine_y_max=machine_y_max, default_tool_diameter=default_tool_diameter,
+                                 using_default_config=session.get('using_default_config', False),
+                                 machines=machines, current_machine_id=current_machine_id,
+                                 materials=available_materials, incomplete_materials=incomplete_materials)
+        # ── END MULTI-PART IMPORT ────────────────────────────────────────────
+
         # If no face_id provided, auto-select the top face
         part_name_from_body = None
         auto_selected_body_id = None
@@ -1902,75 +1952,6 @@ def onshape_import():
 
         # Check if multi-layer export is requested (default: true)
         multilayer = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
-
-        # ── MULTI-PART IMPORT (new) ──────────────────────────────────────────
-        # When ?multi=true the caller wants every body exported as its own DXF
-        # so they can be nested together in a single G-code job.
-        multi_parts = raw_params.get('multi', 'false').lower() in ('true', '1', 'yes')
-
-        if multi_parts:
-            log("🗂️  Multi-part import requested – exporting all bodies as separate DXFs")
-            part_exports = client.export_all_parts_as_dxfs(document_id, workspace_id, element_id)
-
-            if not part_exports:
-                return jsonify({'error': 'No parts could be exported from this document'}), 500
-
-            # Build inline payload: list of {filename, content (text)}
-            dxf_files_inline = []
-            for part in part_exports:
-                raw = part['content']
-                text = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
-                dxf_files_inline.append({
-                    'filename': part['filename'],
-                    'content': text,
-                })
-
-            log(f"✅ Multi-part export: {len(dxf_files_inline)} DXF(s) ready for inline delivery")
-
-            # Save tokens back to session
-            session_manager.update_session_tokens(client)
-
-            # Gather display metadata (reuse existing helpers)
-            team_config_data = session.get('team_config_data', {})
-            team_config = TeamConfig(team_config_data)
-            machines = team_config.get_available_machines()
-            current_machine_id = session.get('machine_id', team_config.default_machine_id)
-            team_config_dict = team_config.to_dict(current_machine_id)
-            drive_enabled = team_config_dict.get('google_drive_enabled', False)
-            machine_x_max = team_config_dict.get('machine_x_max', 48.0)
-            machine_y_max = team_config_dict.get('machine_y_max', 96.0)
-            default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
-            available_materials = team_config.get_available_materials(current_machine_id)
-            available_materials['aluminum_tube'] = {
-                **available_materials.get('aluminum', {}),
-                'name': 'Aluminum Tube'
-            }
-            incomplete_materials = {
-                mid for mid in available_materials
-                if not team_config.is_material_complete(mid, current_machine_id) and mid != 'aluminum_tube'
-            }
-
-            return render_template('index.html',
-                                 dxf_file='',
-                                 dxf_content_inline=None,
-                                 dxf_files_inline=dxf_files_inline,   # ← new multi-file payload
-                                 from_onshape=True,
-                                 document_id=document_id,
-                                 face_id='',
-                                 suggested_filename='',
-                                 detected_thickness=None,
-                                 user_name=session.get('user_name'),
-                                 team_name=session.get('team_name'),
-                                 drive_enabled=drive_enabled,
-                                 machine_x_max=machine_x_max,
-                                 machine_y_max=machine_y_max,
-                                 default_tool_diameter=default_tool_diameter,
-                                 using_default_config=session.get('using_default_config', False),
-                                 machines=machines,
-                                 current_machine_id=current_machine_id,
-                                 materials=available_materials,
-                                 incomplete_materials=incomplete_materials)
-        # ── END MULTI-PART IMPORT ────────────────────────────────────────────
 
         # Fetch DXF from Onshape
         # Use body_id from URL parameter if provided, otherwise use the one from auto-selection
