@@ -498,7 +498,7 @@ document.addEventListener('DOMContentLoaded', () => {
             reader.onload = (e) => {
                 parseDxfForSetup(e.target.result);
             };
-            reader.readAsText(file);
+            reader.readAsText(dxfFiles[0]);
         }
 
         // Handle "Upload a different file" link
@@ -2648,6 +2648,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 appState.uploadedFile = files[0];
                 appState.suggestedFilename = null;
 
+                // Onshape multi-part import exports layered DXFs. Force 2.5D
+                // on the main page so Generate uses the multilayer path.
+                const use25dEl = document.getElementById('use25d');
+                if (use25dEl) {
+                    use25dEl.checked = true;
+                    use25dEl.dispatchEvent(new Event('change'));
+                }
+
                 const fileNameEl = document.getElementById('fileName');
                 const fileSizeEl = document.getElementById('fileSize');
                 const fileLoadedCardEl = document.getElementById('fileLoadedCard');
@@ -2664,8 +2672,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     generateBtnEl.textContent = '🚀 Generate Program';
                 }
 
-                // Parse first file for 2D setup preview
-                parseDxfForSetup(dxfFiles[0].content);
+                // Parse first file for setup preview
+                if (dxfFiles[0] && dxfFiles[0].content) {
+                    parseDxfForSetup(dxfFiles[0].content);
+                }
 
                 const statusDiv = document.getElementById('statusMessage');
                 if (statusDiv) {
