@@ -1778,11 +1778,18 @@ def onshape_import():
         # ?multi=true → export every body as its own DXF; skip single-part flow.
         multi_parts = raw_params.get('multi', 'false').lower() in ('true', '1', 'yes')
         if multi_parts:
-            log("\U0001f5c2\ufe0f  Multi-part import requested – exporting all bodies as separate DXFs")
-            part_exports = client.export_all_parts_as_dxfs(document_id, workspace_id, element_id)
+            multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
+            log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+            part_exports = client.export_all_parts_as_dxfs(
+                document_id, workspace_id, element_id,
+                multilayer=multilayer_for_multi
+            )
 
             if not part_exports:
-                return jsonify({'error': 'No parts could be exported from this document'}), 500
+                return jsonify({
+                    'error': 'No parts could be exported from this document',
+                    'message': 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
+                }), 500
 
             dxf_files_inline = []
             for part in part_exports:
@@ -1815,7 +1822,7 @@ def onshape_import():
                                  dxf_file='', dxf_content_inline=None,
                                  dxf_files_inline=dxf_files_inline,
                                  from_onshape=True, document_id=document_id,
-                                 face_id='', suggested_filename='', detected_thickness=None,
+                                 face_id='', suggested_filename='Onshape_multi_import', detected_thickness=None,
                                  user_name=session.get('user_name'), team_name=session.get('team_name'),
                                  drive_enabled=drive_enabled, machine_x_max=machine_x_max,
                                  machine_y_max=machine_y_max, default_tool_diameter=default_tool_diameter,
