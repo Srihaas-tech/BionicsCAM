@@ -789,7 +789,8 @@ def process_file():
                     multi_ok = True
                     for idx, part_file in enumerate(uploaded_files):
                         part_base_name = Path(part_file.filename).stem
-                        part_input_path = os.path.join(UPLOAD_FOLDER, f"input_{uuid.uuid4().hex}_{part_base_name}.dxf")
+                        safe_base_name = re.sub(r'[^\w\-]+', '_', part_base_name).strip('_')
+                        part_input_path = os.path.join(UPLOAD_FOLDER, f"input_{uuid.uuid4().hex}_{safe_base_name}.dxf")
                         part_file.save(part_input_path)
                         log(f"📝 Processing DXF part {idx + 1}/{len(uploaded_files)}: {part_base_name}")
 
