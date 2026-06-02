@@ -5,6 +5,7 @@
     let selectedFaceId = null;
     let selectedPartId = null;
     let currentSelection = null;  // Full selection object for highlighting
+    let selectedSelections = [];   // All selected face selections for selected-parts import
     let selectionRequestCounter = 0;
     let isWaitingForSelection = false;
 
@@ -39,7 +40,9 @@
             filterType: 'simple',
             entityTypeSpecifier: ['FACE'],      // Only faces
             bodyTypeSpecifier: ['SOLID'],       // Only from solid bodies (not drawings)
-            requiredSelectionCount: 1           // Exactly one face
+            // Let Onshape return whatever face selection the user currently has.
+            // Single selected face still works; multiple selected faces can be imported together.
+            requiredSelectionCount: 1
         };
         window.parent.postMessage(selectionMessage, '*');
         console.log('Requested face selection:', selectionMessage);
@@ -103,7 +106,7 @@
                 multiPartGroup.style.display = 'flex';
             }
             if (importAllPartsBtn) {
-                importAllPartsBtn.textContent = '⬆ Import all parts as 2.5D';
+                importAllPartsBtn.textContent = getSelectedFaceIds().length >= 1 ? '⬆ Import selected part(s) as 2.5D' : '⬆ Import all parts as 2.5D';
             }
 
             // Update instruction if no face selected
@@ -121,7 +124,7 @@
                 multiPartGroup.style.display = 'flex';
             }
             if (importAllPartsBtn) {
-                importAllPartsBtn.textContent = '⬆ Import all parts as 2D';
+                importAllPartsBtn.textContent = getSelectedFaceIds().length >= 1 ? '⬆ Import selected part(s) as 2D' : '⬆ Import all parts as 2D';
             }
 
             // Update instruction if no face selected
@@ -154,26 +157,66 @@
     }
 
     /**
+     * Extract only face selections from an Onshape selection message.
+     */
+    function extractFaceSelections(selections) {
+        return (selections || []).filter(sel => {
+            const entityType = String(sel.entityType || sel.selectionType || '').toUpperCase();
+            const id = sel.selectionId || sel.faceId || sel.id;
+            return !!id && (entityType.includes('FACE') || entityType.includes('ENTITY') || !entityType);
+        });
+    }
+
+    /**
+     * Save the current Onshape face selection list and refresh the UI.
+     */
+    function setCurrentSelections(selections) {
+        const faceSelections = extractFaceSelections(selections);
+        if (!faceSelections.length) {
+            return false;
+        }
+
+        selectedSelections = faceSelections;
+        const first = faceSelections[0];
+        selectedFaceId = first.selectionId || first.faceId || first.id || null;
+        selectedPartId = first.partId || first.bodyId || null;
+        currentSelection = first;
+        isWaitingForSelection = false;
+
+        const countText = faceSelections.length === 1 ? '1 face' : `${faceSelections.length} faces`;
+        instruction.innerHTML = `✓ Onshape selection detected: <strong>${countText}</strong>` +
+            (selectedFaceId ? ` <span style="opacity:.75">(${selectedFaceId})</span>` : '');
+        instruction.style.color = '#27ae60';
+        instruction.style.display = 'block';
+        buttonGroup.style.display = 'flex';
+        sendBtn.disabled = !selectedFaceId;
+
+        updateModeInstructions();
+        console.log('✓ Face selection list:', selectedSelections);
+        return true;
+    }
+
+    function getSelectedFaceIds() {
+        const ids = [];
+        for (const sel of selectedSelections) {
+            const id = sel.selectionId || sel.faceId || sel.id;
+            if (id && !ids.includes(id)) {
+                ids.push(id);
+            }
+        }
+        return ids;
+    }
+
+    /**
      * Handle generic SELECTION messages
      */
     function handleGenericSelection(data) {
         const selections = data.selections || [];
 
         if (selections.length > 0) {
-            // User selected something - treat it as a valid face selection
-            const faceSelection = selections[0];
-            selectedFaceId = faceSelection.selectionId || faceSelection.faceId || faceSelection.id || 'selected';
-            selectedPartId = faceSelection.partId || null;
-            currentSelection = faceSelection;
-            isWaitingForSelection = false;
-
-            instruction.innerHTML = '✓ Onshape faceId selected: <strong>' + selectedFaceId + '</strong>';
-            instruction.style.color = '#27ae60';
-            instruction.style.display = 'block';
-            buttonGroup.style.display = 'flex';
-            sendBtn.disabled = false;
-
-            console.log('✓ Face selected via SELECTION:', selectedFaceId, 'Part:', selectedPartId);
+            // User selected one or more faces. Keep the whole selection list so
+            // Import Selected can import exactly those parts instead of all bodies.
+            setCurrentSelections(selections);
         } else if (isWaitingForSelection && selections.length === 0) {
             // Selection request timed out - re-issue it
             console.log('Selection request timed out, re-requesting...');
@@ -184,6 +227,7 @@
             selectedFaceId = null;
             selectedPartId = null;
             currentSelection = null;
+            selectedSelections = [];
             buttonGroup.style.display = 'none';
             sendBtn.disabled = true;
             requestFaceSelection();
@@ -200,22 +244,8 @@
 
         // Check status code
         if (status.statusCode === 'SUCCESS' && selections.length > 0) {
-            // User successfully selected a face (with filters enforced by Onshape)
-            const faceSelection = selections[0];
-
-            selectedFaceId = faceSelection.selectionId;
-            selectedPartId = faceSelection.partId || null;
-            currentSelection = faceSelection;
-            isWaitingForSelection = false;
-
-            // Update UI - show selected face info and buttons
-            instruction.innerHTML = '✓ Onshape faceId selected: <strong>' + selectedFaceId + '</strong>';
-            instruction.style.color = '#27ae60';
-            instruction.style.display = 'block';
-            buttonGroup.style.display = 'flex';
-            sendBtn.disabled = false;
-
-            console.log('✓ Face selected:', selectedFaceId, 'Part:', selectedPartId, 'Full selection:', faceSelection);
+            // User successfully selected one or more faces.
+            setCurrentSelections(selections);
         } else if (status.statusCode === 'PENDING') {
             // Still waiting for selection
             instruction.innerHTML = 'Select a face to manufacture';
@@ -280,17 +310,26 @@
      * the authenticated Onshape API calls from the normal BionicsCAM domain.
      */
     function handleImportAllParts() {
+        const isMultilayer = multilayerCheckbox.checked;
+        const selectedFaceIds = getSelectedFaceIds();
         const params = new URLSearchParams({
             documentId: context.documentId,
             workspaceId: context.workspaceId,
             elementId: context.elementId,
             server: context.server || 'https://cad.onshape.com',
-            multilayer: 'true',
+            multilayer: isMultilayer ? 'true' : 'false',
             multi: 'true'
         });
 
+        // If the user has any face selected, import only selected body/bodies.
+        // If no face is selected, fall back to the original all-parts behavior.
+        if (selectedFaceIds.length >= 1) {
+            params.append('faceIds', selectedFaceIds.join(','));
+            params.append('selectedOnly', 'true');
+        }
+
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
-        console.log('Opening BionicsCAM multi-part import:', url);
+        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds);
         window.open(url, '_blank');
     }
 
@@ -305,6 +344,7 @@
         selectedFaceId = null;
         selectedPartId = null;
         currentSelection = null;
+        selectedSelections = [];
 
         // Request a new selection
         requestFaceSelection();
