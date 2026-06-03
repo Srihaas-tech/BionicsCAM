@@ -465,7 +465,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
 
-        function handleFiles(files) {
+        async function handleFiles(files) {
             const dxfFiles = files.filter(file => file.name.toLowerCase().endsWith('.dxf'));
             if (dxfFiles.length === 0) {
                 showError('Invalid file type', 'Please upload one or more DXF files.');
@@ -492,6 +492,11 @@ document.addEventListener('DOMContentLoaded', () => {
             generateBtn.textContent = '🚀 Generate Program';
             hideError();
             hideResults();
+
+            if (dxfFiles.length > 1) {
+                await buildCompositePreviewFromFiles(dxfFiles);
+                return;
+            }
 
             // Read DXF file for setup mode
             const reader = new FileReader();
@@ -826,6 +831,8 @@ document.addEventListener('DOMContentLoaded', () => {
         let dxfCanvas2D = null;
         let dxfCtx2D = null;
         let dxfBounds = null;
+        let multiPartPreview = null; // Shelf-packed multi-file preview layout
+        let buildingCompositePreview = false;
 
         // Mode Switching
         function switchMode(mode) {
@@ -853,7 +860,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (stockSizeDisplay) stockSizeDisplay.style.display = 'none';
                 
                 // Resize canvas now that it's visible
-                if (dxfCanvas2D && dxfGeometry) {
+                if (dxfCanvas2D && (dxfGeometry || multiPartPreview)) {
                     setTimeout(() => {
                         const rect = dxfCanvas2D.getBoundingClientRect();
                         if (rect.width > 0 && rect.height > 0) {
@@ -862,7 +869,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                         renderDxfSetup();
                     }, 0);
-                } else if (dxfGeometry) {
+                } else if (dxfGeometry || multiPartPreview) {
                     renderDxfSetup();
                 }
             } else {
@@ -1055,9 +1062,9 @@ document.addEventListener('DOMContentLoaded', () => {
             };
         }
 
-        // Parse DXF geometry from file using dxf-parser library
+        // Parse DXF geometry from file using the manual parser
         function parseDxfForSetup(dxfContent) {
-            parseDxfManually(dxfContent);
+            return parseDxfManually(dxfContent);
         }
 
         // Extract HATCH boundary paths as LWPOLYLINE entities
@@ -1372,24 +1379,31 @@ document.addEventListener('DOMContentLoaded', () => {
             // Organize entities by layer and parse Z depths (reuse existing function)
             const layerData = organizeDxfLayers(entities);
 
-            dxfGeometry = {
+            const parsedGeometry = {
                 minX, maxX, minY, maxY,
                 entities: entities,
                 layers: layerData.layers,
                 layerOrder: layerData.layerOrder
             };
-            dxfBounds = {
+            const parsedBounds = {
                 width: maxX - minX,
                 height: maxY - minY,
                 centerX: (minX + maxX) / 2,
                 centerY: (minY + maxY) / 2
             };
 
-            // Update form visibility based on detected layers (2D vs 2.5D)
-            updateFormVisibility();
+            if (!buildingCompositePreview) {
+                dxfGeometry = parsedGeometry;
+                dxfBounds = parsedBounds;
 
-            document.getElementById('modeToggle').style.display = 'flex';
-            switchMode('setup');
+                // Update form visibility based on detected layers (2D vs 2.5D)
+                updateFormVisibility();
+
+                document.getElementById('modeToggle').style.display = 'flex';
+                switchMode('setup');
+            }
+
+            return { geometry: parsedGeometry, bounds: parsedBounds };
         }
         
         function createEntity(type, data) {
@@ -1436,8 +1450,266 @@ document.addEventListener('DOMContentLoaded', () => {
             return null;
         }
 
+
+        function readFileText(file) {
+            if (!file) {
+                return Promise.reject(new Error('No file provided'));
+            }
+            if (typeof file.text === 'function') {
+                return file.text();
+            }
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = () => reject(new Error(`Failed to read ${file.name || 'DXF file'}`));
+                reader.readAsText(file);
+            });
+        }
+
+        function getMachineStockSize() {
+            return {
+                width: window.MACHINE_CONFIG?.xMax || 48.0,
+                height: window.MACHINE_CONFIG?.yMax || 96.0
+            };
+        }
+
+        function choosePreviewRotation(part, stockW, stockH, nestRotation) {
+            if (nestRotation === '90') return true;
+            if (nestRotation === '0') return false;
+
+            const fits0 = part.bounds.width <= stockW && part.bounds.height <= stockH;
+            const fits90 = part.bounds.height <= stockW && part.bounds.width <= stockH;
+
+            if (fits90 && !fits0) return true;
+            if (fits0 && !fits90) return false;
+            if (fits0 && fits90) {
+                return part.bounds.height < part.bounds.width;
+            }
+            return part.bounds.height < part.bounds.width;
+        }
+
+        function packShelfPreview(parts, stockW, stockH, gap, nestRotation) {
+            const ordered = [...parts].sort((a, b) => {
+                const areaA = (a.bounds.width || 0) * (a.bounds.height || 0);
+                const areaB = (b.bounds.width || 0) * (b.bounds.height || 0);
+                return areaB - areaA;
+            });
+
+            const placements = [];
+            let xCursor = 0.0;
+            let yCursor = 0.0;
+            let rowHeight = 0.0;
+            let maxXUsed = 0.0;
+            let maxYUsed = 0.0;
+
+            ordered.forEach((part, index) => {
+                const rotate90 = choosePreviewRotation(part, stockW, stockH, nestRotation);
+                const slotW = rotate90 ? part.bounds.height : part.bounds.width;
+                const slotH = rotate90 ? part.bounds.width : part.bounds.height;
+
+                if (xCursor > 0 && (xCursor + slotW) > stockW) {
+                    xCursor = 0.0;
+                    yCursor += rowHeight + gap;
+                    rowHeight = 0.0;
+                }
+
+                placements.push({
+                    index,
+                    sourceName: part.fileName,
+                    x: xCursor,
+                    y: yCursor,
+                    slotW,
+                    slotH,
+                    rotationLabel: rotate90 ? '90°' : '0°',
+                    bounds: part.bounds,
+                    area: (part.bounds.width || 0) * (part.bounds.height || 0)
+                });
+
+                maxXUsed = Math.max(maxXUsed, xCursor + slotW);
+                maxYUsed = Math.max(maxYUsed, yCursor + slotH);
+                xCursor += slotW + gap;
+                rowHeight = Math.max(rowHeight, slotH);
+            });
+
+            return {
+                stockW,
+                stockH,
+                gap,
+                placements,
+                usedWidth: Math.max(stockW, maxXUsed),
+                usedHeight: Math.max(stockH, maxYUsed),
+                parts: ordered
+            };
+        }
+
+        function renderMultiPartPreview() {
+            if (!multiPartPreview || !dxfCtx2D || !dxfCanvas2D) return;
+
+            const ctx = dxfCtx2D;
+            const canvas = dxfCanvas2D;
+            const width = canvas.width;
+            const height = canvas.height;
+            if (width === 0 || height === 0) return;
+
+            const stockW = multiPartPreview.stockW;
+            const stockH = multiPartPreview.stockH;
+            const padding = 80;
+            const availWidth = width - 2 * padding;
+            const availHeight = height - 2 * padding;
+            const scale = Math.min(availWidth / stockW, availHeight / stockH);
+
+            const boxLeft = (width - stockW * scale) / 2;
+            const boxTop = (height - stockH * scale) / 2;
+            const boxBottom = boxTop + stockH * scale;
+            const originX = boxLeft;
+            const originY = boxBottom;
+
+            const worldToCanvas = (x, y) => ({
+                x: boxLeft + x * scale,
+                y: boxBottom - y * scale
+            });
+
+            ctx.fillStyle = '#0A0E14';
+            ctx.fillRect(0, 0, width, height);
+
+            // Stock outline
+            ctx.strokeStyle = '#8B949E';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.strokeRect(boxLeft, boxTop, stockW * scale, stockH * scale);
+            ctx.setLineDash([]);
+
+            // Label sheet dimensions
+            ctx.fillStyle = '#8B949E';
+            ctx.font = '14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(`${stockW.toFixed(2)}" × ${stockH.toFixed(2)}" stock`, width / 2, 20);
+
+            // Part rectangles
+            const palette = ['#FDB515', '#60A5FA', '#A78BFA', '#34D399', '#F472B6', '#F59E0B', '#22D3EE'];
+            multiPartPreview.placements.forEach((placement, idx) => {
+                const color = palette[idx % palette.length];
+                const x1 = placement.x;
+                const y1 = placement.y;
+                const w = placement.slotW;
+                const h = placement.slotH;
+                const tl = worldToCanvas(x1, y1 + h);
+                const br = worldToCanvas(x1 + w, y1);
+                const rectW = br.x - tl.x;
+                const rectH = br.y - tl.y;
+
+                ctx.fillStyle = `${color}22`;
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
+                ctx.fillRect(tl.x, tl.y, rectW, rectH);
+                ctx.strokeRect(tl.x, tl.y, rectW, rectH);
+
+                ctx.fillStyle = color;
+                ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                const label = `${idx + 1}. ${placement.sourceName || 'Part'} (${placement.rotationLabel})`;
+                const labelPos = worldToCanvas(x1 + w / 2, y1 + h / 2);
+                ctx.fillText(label, labelPos.x, labelPos.y);
+            });
+
+            // Origin marker at bottom-left
+            ctx.beginPath();
+            ctx.arc(originX, originY, 12, 0, Math.PI * 2);
+            ctx.fillStyle = '#FDB515';
+            ctx.fill();
+            ctx.strokeStyle = '#FDB515';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            ctx.fillStyle = '#FDB515';
+            ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Origin (0,0)', originX, originY - 25);
+
+            ctx.beginPath();
+            ctx.moveTo(originX, originY);
+            ctx.lineTo(originX + 60, originY);
+            ctx.strokeStyle = '#FF0000';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.fillStyle = '#FF0000';
+            ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+            ctx.fillText('X', originX + 70, originY);
+
+            ctx.beginPath();
+            ctx.moveTo(originX, originY);
+            ctx.lineTo(originX, originY - 60);
+            ctx.strokeStyle = '#00FF00';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.fillStyle = '#00FF00';
+            ctx.fillText('Y', originX, originY - 70);
+
+            const fitsInMachine = stockW <= (window.MACHINE_CONFIG?.xMax || 48.0) && stockH <= (window.MACHINE_CONFIG?.yMax || 96.0);
+            ctx.fillStyle = fitsInMachine ? '#8B949E' : '#FF4444';
+            ctx.fillText(
+                `${multiPartPreview.placements.length} part(s) packed into ${Math.max(multiPartPreview.usedWidth, stockW).toFixed(2)}" × ${Math.max(multiPartPreview.usedHeight, stockH).toFixed(2)}"`,
+                width / 2,
+                44
+            );
+        }
+
+        async function buildCompositePreviewFromFiles(files) {
+            if (!files || files.length === 0) return;
+
+            buildingCompositePreview = true;
+            try {
+                if (files.length === 1) {
+                    const singleText = await readFileText(files[0]);
+                    buildingCompositePreview = false;
+                    parseDxfForSetup(singleText);
+                    multiPartPreview = null;
+                    return;
+                }
+
+                const parts = [];
+                for (const file of files) {
+                    const dxfContent = await readFileText(file);
+                    const parsed = parseDxfManually(dxfContent);
+                    if (!parsed || !parsed.bounds) continue;
+                    parts.push({
+                        fileName: file.name || 'part.dxf',
+                        geometry: parsed.geometry,
+                        bounds: parsed.bounds,
+                    });
+                }
+
+                if (parts.length === 0) {
+                    throw new Error('No valid DXF geometry found for preview');
+                }
+
+                const { width: stockW, height: stockH } = getMachineStockSize();
+                const gap = parseFloat(document.getElementById('toolDiameter')?.value || '0.125') || 0.125;
+                const nestRotation = document.getElementById('nestRotation')?.value || 'auto';
+                multiPartPreview = packShelfPreview(parts, stockW, stockH, gap, nestRotation);
+                dxfGeometry = null;
+                dxfBounds = null;
+
+                document.getElementById('modeToggle').style.display = 'flex';
+                switchMode('setup');
+                renderDxfSetup();
+            } catch (error) {
+                console.error('Failed to build multi-part preview:', error);
+                showError('Preview Failed', error.message || 'Unable to build multi-part preview.');
+            } finally {
+                buildingCompositePreview = false;
+            }
+        }
+
         // Render 2D DXF setup view
         function renderDxfSetup() {
+            if (multiPartPreview) {
+                renderMultiPartPreview();
+                return;
+            }
             if (!dxfGeometry || !dxfCtx2D) return;
             
             const ctx = dxfCtx2D;
@@ -2672,10 +2944,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     generateBtnEl.textContent = '🚀 Generate Program';
                 }
 
-                // Parse first file for setup preview
-                if (dxfFiles[0] && dxfFiles[0].content) {
-                    parseDxfForSetup(dxfFiles[0].content);
-                }
+                // Build a combined shelf-packed preview for all imported parts
+                void buildCompositePreviewFromFiles(files);
 
                 const statusDiv = document.getElementById('statusMessage');
                 if (statusDiv) {
@@ -2766,7 +3036,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderer.setSize(container.clientWidth, container.clientHeight);
             
             // Also resize DXF canvas to maintain correct aspect ratio
-            if (dxfCanvas2D && dxfGeometry) {
+            if (dxfCanvas2D && (dxfGeometry || multiPartPreview)) {
                 const rect = dxfCanvas2D.getBoundingClientRect();
                 dxfCanvas2D.width = rect.width;
                 dxfCanvas2D.height = rect.height;
