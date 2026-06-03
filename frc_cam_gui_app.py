@@ -1,2609 +1,2995 @@
-#!/usr/bin/env python3
-"""
-BionicsCam - FRC Team 4909 CAM Tool
-A Flask-based web interface for generating G-code from DXF files
-"""
-"""
-This is a test commit
-"""
-from flask import Flask, render_template, request, jsonify, send_file, session, send_from_directory, redirect
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from werkzeug.middleware.proxy_fix import ProxyFix
-import os
-import sys
-import subprocess
-import tempfile
-import shutil
-import traceback
-from pathlib import Path
-import json
-import secrets
-import re
-import uuid
+// ============================================================================
+// Application State
+// ============================================================================
 
-# Upstash Redis for job history
-try:
-    from upstash_redis import Redis as UpstashRedis
-    _redis_url = os.environ.get('UPSTASH_REDIS_KV_REST_API_URL')
-    _redis_token = os.environ.get('UPSTASH_REDIS_KV_REST_API_TOKEN')
-    if _redis_url and _redis_token:
-        job_redis = UpstashRedis(url=_redis_url, token=_redis_token)
-        REDIS_AVAILABLE = True
-        print("✅ Upstash Redis connected for job history")
-    else:
-        job_redis = None
-        REDIS_AVAILABLE = False
-        print("⚠️ Redis env vars not set, job history disabled")
-except ImportError:
-    job_redis = None
-    REDIS_AVAILABLE = False
-    print("⚠️ upstash-redis not installed, job history disabled")
+const appState = {
+    // File upload
+    uploadedFiles: [],
+    uploadedFile: null,
+    suggestedFilename: null,
+    gcodeContent: null,
+    outputFilename: null,
 
-def save_job(user_id, job_data):
-    """Save a job to Redis history."""
-    if not REDIS_AVAILABLE or not job_redis:
-        return
-    try:
-        job_id = str(uuid.uuid4())
-        job_data['id'] = job_id
-        key = f"jobs:{user_id}:{job_id}"
-        job_redis.set(key, json.dumps(job_data))
-        job_redis.expire(key, 60 * 60 * 24 * 90)  # 90 days
-        # Add to user's job index
-        index_key = f"job_index:{user_id}"
-        job_redis.lpush(index_key, job_id)
-        job_redis.ltrim(index_key, 0, 99)  # Keep last 100 jobs
-        job_redis.expire(index_key, 60 * 60 * 24 * 90)
-        print(f"✅ Saved job {job_id} for user {user_id}")
-    except Exception as e:
-        print(f"⚠️ Failed to save job: {e}")
+    // 3D Visualization
+    scene: null,
+    camera: null,
+    renderer: null,
+    controls: null,
+    optimalCameraPosition: { x: 10, y: 10, z: 10 },
+    optimalLookAtPosition: { x: 0, y: 0, z: 0 },
 
-def get_jobs(user_id):
-    """Get all jobs for a user from Redis."""
-    if not REDIS_AVAILABLE or not job_redis:
-        return []
-    try:
-        index_key = f"job_index:{user_id}"
-        job_ids = job_redis.lrange(index_key, 0, 99)
-        jobs = []
-        for job_id in job_ids:
-            key = f"jobs:{user_id}:{job_id}"
-            data = job_redis.get(key)
-            if data:
-                jobs.append(json.loads(data))
-        return jobs
-    except Exception as e:
-        print(f"⚠️ Failed to get jobs: {e}")
-        return []
+    // DXF Setup
+    currentMode: 'setup',
+    dxfGeometry: null,
+    rotationAngle: 0,
+    dxfCanvas2D: null,
+    dxfCtx2D: null,
+    dxfBounds: null,
+    nestedParts: null,
 
+    // Drive integration
+    driveAvailable: false
+};
 
-def process_standard_dxf_file(
-    input_path,
-    material,
-    machine_id,
-    thickness,
-    tool_diameter,
-    origin_corner,
-    rotation,
-    use_25d,
-    tab_spacing,
-    team_config,
-    user_name,
-    suggested_filename,
-    timestamp_str,
-):
-    """Process a single standard DXF into G-code."""
-    pp = FRCPostProcessor(
-        material_thickness=thickness,
-        tool_diameter=tool_diameter,
-        units='inch',
-        config=team_config
-    )
-    pp.use_25d = use_25d
-    pp.apply_material_preset(material, machine_id)
+// ============================================================================
+// DXF Geometry Utilities
+// ============================================================================
 
-    if user_name:
-        pp.user_name = user_name
+/**
+ * Check if an angle is within an arc's angular range
+ * Handles arcs that cross the 0° boundary
+ */
+function angleInArcRange(angle, startAngle, endAngle) {
+    // Normalize angles to 0-360
+    angle = ((angle % 360) + 360) % 360;
+    startAngle = ((startAngle % 360) + 360) % 360;
+    endAngle = ((endAngle % 360) + 360) % 360;
 
-    pp.tab_spacing = tab_spacing
-    pp.load_dxf(input_path)
-    pp.transform_coordinates(origin_corner, rotation)
-    pp.identify_perimeter_and_pockets()
-    pp.classify_holes()
+    if (startAngle <= endAngle) {
+        return angle >= startAngle && angle <= endAngle;
+    } else {
+        // Arc crosses 0°
+        return angle >= startAngle || angle <= endAngle;
+    }
+}
 
-    result = pp.generate_gcode(suggested_filename=suggested_filename, timestamp=timestamp_str)
-    return pp, result
+/**
+ * Calculate tight bounding box for an arc (not full circle)
+ * Returns {minX, maxX, minY, maxY}
+ */
+function calculateArcBounds(centerX, centerY, radius, startAngle, endAngle) {
+    // Start with arc endpoints
+    const startRad = startAngle * Math.PI / 180;
+    const endRad = endAngle * Math.PI / 180;
 
+    const points = [
+        { x: centerX + radius * Math.cos(startRad), y: centerY + radius * Math.sin(startRad) },
+        { x: centerX + radius * Math.cos(endRad), y: centerY + radius * Math.sin(endRad) }
+    ];
 
-def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, timestamp_str):
-    """Place multiple independently generated parts side-by-side on the sheet.
+    // Check if arc crosses any cardinal directions (extrema)
+    if (angleInArcRange(0, startAngle, endAngle)) {
+        points.push({ x: centerX + radius, y: centerY });  // Right (0°)
+    }
+    if (angleInArcRange(90, startAngle, endAngle)) {
+        points.push({ x: centerX, y: centerY + radius });  // Top (90°)
+    }
+    if (angleInArcRange(180, startAngle, endAngle)) {
+        points.push({ x: centerX - radius, y: centerY });  // Left (180°)
+    }
+    if (angleInArcRange(270, startAngle, endAngle)) {
+        points.push({ x: centerX, y: centerY - radius });  // Bottom (270°)
+    }
 
-    V1 shelf packing:
-    - sort by largest area first
-    - place left-to-right until we run out of room
-    - then start a new row
-    - rotate 90° only when requested or when it improves fit in auto mode
-    """
-    if not parts:
-        raise ValueError('No parts to combine')
+    // Calculate bounds from all critical points
+    const xs = points.map(p => p.x);
+    const ys = points.map(p => p.y);
 
-    def choose_rotation(part):
-        if nest_rotation == '90':
-            return True
-        if nest_rotation == '0':
-            return False
-
-        fits_0 = part['part_w'] <= stock_x and part['part_h'] <= stock_y
-        fits_90 = part['part_h'] <= stock_x and part['part_w'] <= stock_y
-
-        if fits_90 and not fits_0:
-            return True
-        if fits_0 and not fits_90:
-            return False
-        if fits_0 and fits_90:
-            # Prefer the orientation that uses less width so the shelf fills left-to-right better.
-            return part['part_h'] < part['part_w']
-
-        # Neither orientation fits cleanly; keep the narrower orientation for a best-effort preview.
-        return part['part_h'] < part['part_w']
-
-    def extract_toolpath(gcode_str):
-        lines = gcode_str.splitlines()
-        start = next((i for i, l in enumerate(lines)
-                      if l.strip() and not l.strip().startswith('(')
-                      and any(c in l for c in ('G0 ', 'G1 ', 'G2 ', 'G3 ',
-                                                'G00', 'G01', 'G02', 'G03',
-                                                'M3', 'M03'))), 0)
-        end = next((i for i, l in enumerate(lines)
-                    if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
-        return '\n'.join(lines[start:end])
-
-    ordered_parts = sorted(
-        parts,
-        key=lambda part: (part['part_w'] * part['part_h']),
-        reverse=True,
-    )
-
-    placements = []
-    x_cursor = 0.0
-    y_cursor = 0.0
-    row_height = 0.0
-    max_x_used = 0.0
-    row_count = 1 if ordered_parts else 0
-    current_row_count = 0
-    max_cols = 0
-
-    for idx, part in enumerate(ordered_parts):
-        do_rotate = choose_rotation(part)
-        if do_rotate:
-            slot_w, slot_h = part['part_h'], part['part_w']
-            gcode = FRCPostProcessor.rotate_gcode_90(part['result'].gcode, part['part_w'], part['part_h'])
-            rot_label = '90°'
-        else:
-            slot_w, slot_h = part['part_w'], part['part_h']
-            gcode = part['result'].gcode
-            rot_label = '0°'
-
-        if x_cursor > 0 and (x_cursor + slot_w) > stock_x:
-            max_cols = max(max_cols, current_row_count)
-            current_row_count = 0
-            x_cursor = 0.0
-            y_cursor += row_height + gap
-            row_height = 0.0
-            row_count += 1
-
-        if (y_cursor + slot_h) > stock_y:
-            raise ValueError(
-                f'Not enough stock space for part {idx + 1}: needed {slot_w:.3f}" x {slot_h:.3f}", '
-                f'but only {(stock_x - x_cursor):.3f}" x {(stock_y - y_cursor):.3f}" remained.'
-            )
-
-        placements.append({
-            'index': idx,
-            'source_name': part['source_name'],
-            'gcode': gcode,
-            'x': x_cursor,
-            'y': y_cursor,
-            'slot_w': slot_w,
-            'slot_h': slot_h,
-            'rotation_label': rot_label,
-        })
-
-        current_row_count += 1
-        max_x_used = max(max_x_used, x_cursor + slot_w)
-        x_cursor += slot_w + gap
-        row_height = max(row_height, slot_h)
-
-    max_cols = max(max_cols, current_row_count)
-
-    combined_blocks = []
-    for placement in placements:
-        shifted = FRCPostProcessor.offset_gcode(placement['gcode'], dx=placement['x'], dy=placement['y'])
-        if placement['index'] == 0:
-            combined_blocks.append(shifted)
-        else:
-            combined_blocks.append(
-                f"( --- Part {placement['index'] + 1}: {placement['source_name']} X+{placement['x']:.3f}\" Y+{placement['y']:.3f}\" rot={placement['rotation_label']} --- )"
-            )
-            combined_blocks.append(extract_toolpath(shifted))
-
-    combined_gcode = '\n'.join(combined_blocks)
-    return combined_gcode, placements, max_x_used, y_cursor + row_height, row_count, max_cols
-
-import atexit
-import time
-import threading
-from datetime import datetime
-from urllib.parse import urlencode
-import ezdxf
-import logging
-import metrics
-
-# Configure logging for Vercel
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(message)s',
-    stream=sys.stderr,
-    force=True
-)
-logger = logging.getLogger(__name__)
-
-# Disable Werkzeug's request logging (clutters Vercel logs)
-# Try multiple approaches since WSGI environment might be tricky
-logging.getLogger('werkzeug').disabled = True
-logging.getLogger('werkzeug').setLevel(logging.ERROR)  # Only show errors, not INFO
-werkzeug_logger = logging.getLogger('werkzeug')
-werkzeug_logger.handlers = []  # Remove all handlers
-
-# Logging helper for Vercel/serverless environments
-def log(*args, **kwargs):
-    """Log to stderr using Python logging module for better Vercel compatibility"""
-    message = ' '.join(str(arg) for arg in args)
-    logger.info(message)
-
-# Import Google Drive integration (optional - will work without it)
-try:
-    from google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
-    GOOGLE_DRIVE_AVAILABLE = True
-except ImportError:
-    GOOGLE_DRIVE_AVAILABLE = False
-    log("⚠️  Google Drive integration not available (missing dependencies)")
-    log("   Install with: pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client")
-
-# Import authentication (optional - will work without it)
-try:
-    from penguincam_auth import init_auth
-    AUTH_AVAILABLE = True
-except ImportError:
-    AUTH_AVAILABLE = False
-    log("⚠️  Authentication module not available")
-
-# Import Onshape integration (optional - will work without it)
-try:
-    from onshape_integration import get_onshape_client, session_manager
-    ONSHAPE_AVAILABLE = True
-except ImportError:
-    ONSHAPE_AVAILABLE = False
-    log("⚠️  Onshape integration not available")
-
-# Import postprocessor directly (for API calls instead of subprocess)
-from frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
-
-# Import team config management
-from team_config import TeamConfig
-
-# ============================================================================
-# File Token Manager - Secure file access with random tokens
-# ============================================================================
-
-class FileTokenManager:
-    """
-    Manages secure token-based file access to prevent filename guessing attacks.
-    Maps random tokens to actual file paths and handles automatic cleanup.
-
-    For serverless (Vercel), tokens are stored in Flask session cookies using 
-    compact keys to keep under the 4KB size limit.
-    """
-
-    def __init__(self):
-        # For backwards compatibility with non-serverless environments
-        self.tokens = {}  # token → {'filepath': ..., 'filename': ..., 'created': timestamp}
-        self.lock = threading.Lock()
-        self.use_session = os.environ.get('VERCEL') == '1'  # Use session storage on Vercel
-        self.use_25d = False
-        
-    def register_file(self, filepath, real_filename):
-        """
-        Register a file and return a secure random token.
-        """
-        token = secrets.token_urlsafe(16)  # Shorter token to save cookie space
-        
-        # Grab ONLY the file's base name (e.g. 'tmp_abc123.dxf')
-        # This completely strips out giant absolute system filepaths to minimize cookie size!
-        disk_basename = os.path.basename(filepath)
-
-        if self.use_session:
-            # Store in Flask session (cookie-based, works across serverless instances)
-            if 'file_tokens' not in session:
-                session['file_tokens'] = {}
-            
-            # Minimize payload size down to under 100 bytes total
-            session['file_tokens'][token] = {
-                'b': disk_basename,
-                'f': real_filename
-            }
-            session.modified = True  # Force session save
-        else:
-            # Store in memory (for non-serverless environments)
-            with self.lock:
-                self.tokens[token] = {
-                    'filepath': filepath,
-                    'filename': real_filename,
-                    'created': time.time()
-                }
-
-        log(f"🔐 Compact token registered: {token[:8]}... ({'session' if self.use_session else 'memory'})")
-        return token
-
-    def get_file(self, token):
-        """
-        Look up a registered file by its token.
-        """
-        if self.use_session:
-            file_tokens = session.get('file_tokens', {})
-            info = file_tokens.get(token)
-            if not info:
-                return None
-            
-            # Reconstruct the expected full system details mapping using the temp dir 
-            return {
-                'filepath': os.path.join(tempfile.gettempdir(), info['b']),
-                'filename': info['f']
-            }
-        else:
-            with self.lock:
-                return self.tokens.get(token)
-
-    def clean_expired_files(self, max_age_seconds=3600):
-        """
-        Clean up files older than max_age_seconds.
-        """
-        if self.use_session:
-            return
-
-        current_time = time.time()
-        expired_tokens = []
-
-        with self.lock:
-            for token, info in self.tokens.items():
-                if current_time - info['created'] > max_age_seconds:
-                    expired_tokens.append(token)
-                    try:
-                        if os.path.exists(info['filepath']):
-                            os.remove(info['filepath'])
-                    except Exception as e:
-                        log(f"⚠️ Error deleting expired file {info['filepath']}: {e}")
-
-            for token in expired_tokens:
-                del self.tokens[token]
-
-        if expired_tokens:
-            log(f"🗑️ Cleaned up {len(expired_tokens)} expired memory tokens.")
-
-def cleanup_worker():
-    """Background thread that periodically cleans up old files"""
-    while True:
-        time.sleep(600)  # Run every 10 minutes
-        try:
-            # 🔄 Fixed the method name here to match our clean function!
-            file_token_manager.clean_expired_files(max_age_seconds=3600)  # 1 hour
-        except Exception as e:
-            log(f"⚠️ Error in cleanup worker: {e}")
-
-# Initialize file token manager
-file_token_manager = FileTokenManager()
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
-
-# Disable Flask/Werkzeug request logging in production (Vercel)
-if os.environ.get('VERCEL'):
-    app.logger.disabled = True
-    log_werkzeug = logging.getLogger('werkzeug')
-    log_werkzeug.disabled = True
-
-# Trust proxy headers (Railway, nginx, etc.)
-# This tells Flask it's behind HTTPS even if internal requests are HTTP
-app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
-
-# Set secret key for session management (required by auth and Onshape integration)
-# Hardcoded fixed fallback ensures serverless containers NEVER desync keys!
-secret_key = os.environ.get('FLASK_SECRET_KEY')
-if secret_key:
-    app.secret_key = secret_key
-    log("✅ Using persistent FLASK_SECRET_KEY from environment")
-else:
-    # Forced identical backup key so Container A and Container B always match
-    app.secret_key = 'b20029bd9519dbbe19397c970f5ab6116cd6077cd7e1c09f61db5ea56e805519'
-    log("🔒 Using hardcoded fallback FLASK_SECRET_KEY for container sync")
-    
-# Initialize authentication if available
-if AUTH_AVAILABLE:
-    auth = init_auth(app)
-else:
-    # Create a dummy auth object that allows everything
-    class DummyAuth:
-        def is_enabled(self):
-            return False
-        def require_auth(self, f):
-            return f
-        def is_authenticated(self):
-            return True
-    auth = DummyAuth()
-
-# Initialize rate limiting
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["200 per hour"],  # Global default for all routes
-    storage_uri="memory://",
-    headers_enabled=True  # Send X-RateLimit headers in responses
-)
-log("✅ Rate limiting enabled (200 requests/hour default)")
-
-# Directory for temporary files
-# Serverless platforms (Vercel, Lambda) have /tmp as only writable location
-# Traditional servers get isolated temp directory
-if os.environ.get('VERCEL') == '1':
-    TEMP_DIR = '/tmp'
-    log("✅ Using /tmp for serverless environment")
-else:
-    TEMP_DIR = tempfile.mkdtemp()
-    log(f"✅ Created temp directory: {TEMP_DIR}")
-
-UPLOAD_FOLDER = os.path.join(TEMP_DIR, 'uploads')
-OUTPUT_FOLDER = os.path.join(TEMP_DIR, 'outputs')
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-
-# Path to the post-processor script (assumed to be in same directory)
-SCRIPT_DIR = Path(__file__).parent
-POST_PROCESSOR = SCRIPT_DIR / 'frc_cam_postprocessor.py'
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def get_current_user_id():
-    """Get the current user ID from session"""
-    return session.get('user_email', 'default_user')
-
-def get_onshape_client_or_401():
-    """
-    Get Onshape client for current user, or return 401 error response.
-    Returns: (client, error_response, status_code)
-    If client is None, return the error_response with status_code.
-    """
-    if not ONSHAPE_AVAILABLE:
-        return None, jsonify({'error': 'Onshape integration not available'}), 400
-
-    client = session_manager.get_client(get_current_user_id())
-    if not client:
-        return None, jsonify({
-            'error': 'Not authenticated with Onshape',
-            'auth_url': '/onshape/auth'
-        }), 401
-
-    return client, None, None
-
-def extract_onshape_params(params):
-    """Extract Onshape parameters from request params dict"""
     return {
-        'document_id': params.get('documentId') or params.get('did'),
-        'workspace_id': params.get('workspaceId') or params.get('wid'),
-        'element_id': params.get('elementId') or params.get('eid'),
-        'face_id': params.get('faceId') or params.get('fid'),
-        'body_id': params.get('partId') or params.get('bodyId') or params.get('bid')
+        minX: Math.min(...xs),
+        maxX: Math.max(...xs),
+        minY: Math.min(...ys),
+        maxY: Math.max(...ys)
+    };
+}
+
+
+function cloneEntity(entity) {
+    return JSON.parse(JSON.stringify(entity));
+}
+
+function translatePoint(point, dx, dy) {
+    return { x: point.x + dx, y: point.y + dy };
+}
+
+function rotatePoint90CCW(point) {
+    return { x: -point.y, y: point.x };
+}
+
+function rotateEntityForPreview(entity, rotate90, partBounds) {
+    const normalized = cloneEntity(entity);
+    const shiftX = -partBounds.minX;
+    const shiftY = -partBounds.minY;
+
+    const transformXY = (x, y) => {
+        let px = x + shiftX;
+        let py = y + shiftY;
+        if (rotate90) {
+            const rotated = rotatePoint90CCW({ x: px, y: py });
+            return { x: partBounds.height + rotated.x, y: rotated.y };
+        }
+        return { x: px, y: py };
+    };
+
+    if (normalized.type === 'LINE') {
+        normalized.vertices = normalized.vertices.map(v => transformXY(v.x, v.y));
+    } else if (normalized.type === 'CIRCLE') {
+        const center = transformXY(normalized.center.x, normalized.center.y);
+        normalized.center = center;
+        if (rotate90) {
+            normalized.radius = normalized.radius;
+        }
+    } else if (normalized.type === 'ARC') {
+        const center = transformXY(normalized.center.x, normalized.center.y);
+        normalized.center = center;
+        if (rotate90) {
+            const start = normalized.startAngle || 0;
+            const end = normalized.endAngle || 360;
+            normalized.startAngle = (start + 90) % 360;
+            normalized.endAngle = (end + 90) % 360;
+        }
+    } else if (normalized.type === 'LWPOLYLINE' || normalized.type === 'POLYLINE') {
+        normalized.vertices = normalized.vertices.map(v => transformXY(v.x, v.y));
+    } else if (normalized.type === 'SPLINE' && normalized.controlPoints) {
+        normalized.controlPoints = normalized.controlPoints.map(v => transformXY(v.x, v.y));
     }
 
-def fetch_face_normal_and_body(client, document_id, workspace_id, element_id, face_id, body_id):
-    """
-    Fetch face normal and body information for a given face_id.
-
-    Returns:
-        tuple: (face_normal dict, auto_selected_body_id, part_name_from_body)
-    """
-    log(f"Face ID provided: {face_id}, fetching face normal...")
-
-    face_normal = None
-    auto_selected_body_id = None
-    part_name_from_body = None
-
-    try:
-        # Get all faces to find the normal for the selected face
-        faces_data = client.list_faces(document_id, workspace_id, element_id)
-
-        if faces_data and 'bodies' in faces_data:
-            # Debug: Log all face IDs to find mismatch
-            all_face_ids = []
-            for body in faces_data['bodies']:
-                for face in body.get('faces', []):
-                    all_face_ids.append(face.get('id'))
-            log(f"🔍 All face IDs in response ({len(all_face_ids)} total): {all_face_ids[:20]}{'...' if len(all_face_ids) > 20 else ''}")
-            log(f"🔍 Looking for face_id: {face_id}")
-
-            # Search through all bodies and faces to find the matching face_id
-            for body in faces_data['bodies']:
-                bid = body.get('id')
-                for face in body.get('faces', []):
-                    if face.get('id') == face_id:
-                        # Found the matching face! Extract its normal
-                        surface = face.get('surface', {})
-                        face_normal = surface.get('normal', {})
-                        part_name_from_body = body.get('properties', {}).get('name', 'Unnamed')
-
-                        # Set body_id if not already provided
-                        if not body_id:
-                            auto_selected_body_id = bid
-
-                        log(f"✅ Found face {face_id} in body {bid} ({part_name_from_body})")
-                        log(f"   Normal: ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
-                        break
-                if face_normal:
-                    break
-
-        if not face_normal:
-            log(f"⚠️  Warning: Could not find normal for face {face_id}, using default view")
-
-    except Exception as e:
-        log(f"⚠️  Warning: Error fetching face normal: {e}")
-        log("   Continuing with default view matrix")
-
-    return face_normal, auto_selected_body_id, part_name_from_body
-
-def generate_onshape_filename(doc_name, part_name):
-    """
-    Generate a clean filename from Onshape document and part names.
-    Falls back to timestamp if names are unavailable or generic.
-    """
-    # Clean function for filename sanitization
-    def clean_name(name):
-        return re.sub(r'[^\w\s-]', '', name).strip().replace(' ', '_')[:50]
-
-    if doc_name and part_name:
-        # Best case: combine both
-        doc_clean = clean_name(doc_name)
-        part_clean = clean_name(part_name)
-        return f"{doc_clean}_{part_clean}"
-
-    elif part_name:
-        # Fallback: part name only
-        part_clean = clean_name(part_name)
-        if part_clean and part_clean != 'Unnamed_Part':
-            return part_clean
-
-    # Last resort: timestamp (server's local time)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    return f"Onshape_Part_{timestamp}"
-
-# ============================================================================
-# Routes
-# ============================================================================
-
-@app.route('/')
-def index():
-    """Render the main GUI page"""
-
-    # Get user/team info from session (if coming from Onshape)
-    user_name = session.get('user_name')
-    team_name = session.get('team_name')
-
-    # Reconstruct TeamConfig
-    team_config_data = session.get('team_config_data', {})
-    team_config = TeamConfig(team_config_data)
-
-    # Get available machines
-    machines = team_config.get_available_machines()
-
-    # Get current machine (from session, or use default)
-    current_machine_id = session.get('machine_id', team_config.default_machine_id)
-
-    # Get machine-specific config dict
-    team_config_dict = team_config.to_dict(current_machine_id)
-    drive_enabled = team_config_dict.get('google_drive_enabled', False)
-    default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
-    machine_x_max = team_config_dict.get('machine_x_max', 48.0)
-    machine_y_max = team_config_dict.get('machine_y_max', 96.0)
-
-    # Get available materials for current machine
-    available_materials = team_config.get_available_materials(current_machine_id)
-
-    # Add 'aluminum_tube' as a special UI-only material (uses aluminum preset)
-    available_materials['aluminum_tube'] = {
-        **available_materials.get('aluminum', {}),
-        'name': 'Aluminum Tube'
-    }
-
-    # Check for incomplete materials (custom materials missing required params)
-    incomplete_materials = {
-        material_id for material_id in available_materials.keys()
-        if not team_config.is_material_complete(material_id, current_machine_id) and material_id != 'aluminum_tube'
-    }
-
-    return render_template('index.html',
-                         user_name=user_name,
-                         team_name=team_name,
-                         drive_enabled=drive_enabled,
-                         default_tool_diameter=default_tool_diameter,
-                         machine_x_max=machine_x_max,
-                         machine_y_max=machine_y_max,
-                         using_default_config=session.get('using_default_config', False),
-                         machines=machines,
-                         current_machine_id=current_machine_id,
-                         materials=available_materials,
-                         incomplete_materials=incomplete_materials,
-                         detected_thickness=None)
-
-@app.route('/process', methods=['POST'])
-@limiter.limit("10 per minute")  # Strict limit - CPU intensive operation
-def process_file():
-    """Process uploaded DXF file and generate G-code"""
-    try:
-        # Get uploaded file(s)
-        uploaded_files = [f for f in request.files.getlist('files') if f and f.filename]
-        if not uploaded_files:
-            if 'file' not in request.files:
-                return jsonify({'error': 'No file uploaded'}), 400
-            file = request.files['file']
-            if file.filename == '':
-                return jsonify({'error': 'No file selected'}), 400
-            uploaded_files = [file]
-        else:
-            file = uploaded_files[0]
-
-        if any(not f.filename.lower().endswith('.dxf') for f in uploaded_files):
-            return jsonify({'error': 'All uploaded files must be DXF files'}), 400
-
-        # Get parameters
-        material = request.form.get('material', 'plywood')
-        is_aluminum_tube = (material.lower() == 'aluminum_tube')
-        machine_id = request.form.get('machine_id', None)  # Optional machine selection
-
-        # Map special cases:
-        # - 'aluminum_tube' -> 'aluminum' (aluminum_tube is UI-only, uses aluminum preset)
-        # - 'polycarb' -> 'polycarbonate' (legacy compatibility)
-        # All other materials pass through as-is (including custom materials from config)
-        if material.lower() == 'aluminum_tube':
-            material = 'aluminum'
-        elif material.lower() == 'polycarb':
-            material = 'polycarbonate'
-
-        tool_diameter = float(request.form.get('tool_diameter', 0.157))
-        origin_corner = request.form.get('origin_corner', 'bottom-left')
-        rotation = int(request.form.get('rotation', 0))
-        use_25d = request.form.get('use25d', 'false').lower() == 'true'
-        quantity = max(1, min(int(request.form.get('quantity', 1)), 50))  # clamp 1-50
-        # nest_rotation: 'auto' | '0' | '90'
-        nest_rotation = request.form.get('nest_rotation', 'auto')
-        suggested_filename = request.form.get('suggested_filename', '')
-
-        # Get timestamp from client (in user's local timezone)
-        timestamp_str = request.form.get('timestamp', '')
-
-        # Material-specific parameters
-        thickness = float(request.form.get('thickness', 0.25))  # Material/wall thickness (used by both modes)
-
-        if is_aluminum_tube:
-            # Tube mode parameters
-            tube_height = float(request.form.get('tube_height', 1.0))
-            square_end = request.form.get('square_end', '0') == '1'
-            cut_to_length = request.form.get('cut_to_length', '0') == '1'
-        else:
-            # Standard mode parameters
-            tab_spacing = float(request.form.get('tab_spacing', 6.0))
-
-        # Save uploaded file
-        input_path = os.path.join(UPLOAD_FOLDER, 'input.dxf')
-        file.save(input_path)
-
-        # For tube mode, extract DXF bounds to determine tube dimensions
-        tube_width = None
-        tube_length = None
-        if is_aluminum_tube:
-            try:
-                doc = ezdxf.readfile(input_path)
-                msp = doc.modelspace()
-
-                # Collect all geometry bounds
-                all_x = []
-                all_y = []
-
-                for entity in msp:
-                    if entity.dxftype() == 'CIRCLE':
-                        center = entity.dxf.center
-                        radius = entity.dxf.radius
-                        all_x.extend([center.x - radius, center.x + radius])
-                        all_y.extend([center.y - radius, center.y + radius])
-                    elif entity.dxftype() in ['LWPOLYLINE', 'POLYLINE']:
-                        points = list(entity.get_points())
-                        if points:
-                            all_x.extend([p[0] for p in points])
-                            all_y.extend([p[1] for p in points])
-                    elif entity.dxftype() == 'LINE':
-                        all_x.extend([entity.dxf.start.x, entity.dxf.end.x])
-                        all_y.extend([entity.dxf.start.y, entity.dxf.end.y])
-
-                if all_x and all_y:
-                    dxf_width = max(all_x) - min(all_x)
-                    dxf_height = max(all_y) - min(all_y)
-
-                    # Account for rotation: swap dimensions if rotated 90° or 270°
-                    if rotation in [90, 270]:
-                        tube_width = dxf_height
-                        tube_length = dxf_width
-                        log(f"📏 Detected tube dimensions (after {rotation}° rotation): {tube_width:.3f}\" x {tube_length:.3f}\"")
-                    else:
-                        tube_width = dxf_width
-                        tube_length = dxf_height
-                        log(f"📏 Detected tube dimensions: {tube_width:.3f}\" x {tube_length:.3f}\"")
-            except Exception as e:
-                log(f"⚠️  Could not extract tube dimensions from DXF: {e}")
-
-        # Generate suggested filename base (without extension or timestamp)
-        if suggested_filename:
-            # Use Onshape-derived name
-            base_name = suggested_filename
-            log(f"📝 Using Onshape filename base: {base_name}")
-        else:
-            # Use DXF filename
-            base_name = Path(file.filename).stem
-            log(f"📝 Using DXF filename base: {base_name}")
-
-        log(f"🚀 Running post-processor API...")
-
-        # Get team config from session (if available)
-        config_data = session.get('team_config_data', {})
-        log(f"🔍 DEBUG: Session team_config_data keys: {list(config_data.keys()) if config_data else 'EMPTY'}")
-        log(f"🔍 DEBUG: Session has {len(config_data)} top-level keys in team_config_data")
-        team_config = TeamConfig.from_dict(config_data)
-        log(f"📋 Using team config: {team_config}")
-        log(f"🔍 DEBUG: TeamConfig internals: team={team_config.team_number}, name={team_config.team_name}")
-
-        # Call post-processor API based on mode
-        try:
-            if is_aluminum_tube:
-                # Tube mode - use tube-pattern API
-                pp = FRCPostProcessor(
-                    material_thickness=thickness,
-                    tool_diameter=tool_diameter,
-                    units='inch',
-                    config=team_config
-                )
-                pp.use_25d = use_25d
-                # Store tube height for Z-offset calculations
-                pp.tube_height = tube_height
-
-                # Apply material preset (for specific machine if selected)
-                pp.apply_material_preset(material, machine_id)
-
-                # Add user name if authenticated
-                user_name = session.get('user_name')
-                if user_name:
-                    pp.user_name = user_name
-
-                # Load and process DXF
-                pp.load_dxf(input_path)
-                pp.transform_coordinates('bottom-left', rotation)  # Tube jig is always bottom-left
-                pp.identify_perimeter_and_pockets()  # Must come BEFORE classify_holes to remove perimeter circles
-                pp.classify_holes()
-
-                # Generate G-code using API
-                result = pp.generate_tube_pattern_gcode(
-                    tube_height=tube_height,
-                    square_end=square_end,
-                    cut_to_length=cut_to_length,
-                    tube_width=tube_width,
-                    tube_length=tube_length,
-                    suggested_filename=base_name,
-                    timestamp=timestamp_str
-                )
-            else:
-                # Standard mode - use standard API
-                user_name = session.get('user_name')
-                standard_parts = []
-
-                if len(uploaded_files) > 1:
-                    if quantity > 1:
-                        log("⚠️ Multiple DXFs selected; quantity is ignored and each DXF is placed once.")
-                        quantity = 1
-
-                    multi_ok = True
-                    # Seek all streams back to start — uploaded_files[0] (== file) was
-                    # already consumed by the unconditional file.save() above.
-                    for f in uploaded_files:
-                        f.stream.seek(0)
-                    for idx, part_file in enumerate(uploaded_files):
-                        part_base_name = Path(part_file.filename).stem
-                        safe_base_name = re.sub(r'[^\w\-]+', '_', part_base_name).strip('_')
-                        part_input_path = os.path.join(UPLOAD_FOLDER, f"input_{uuid.uuid4().hex}_{safe_base_name}.dxf")
-                        part_file.save(part_input_path)
-                        log(f"📝 Processing DXF part {idx + 1}/{len(uploaded_files)}: {part_base_name}")
-
-                        pp, part_result = process_standard_dxf_file(
-                            input_path=part_input_path,
-                            material=material,
-                            machine_id=machine_id,
-                            thickness=thickness,
-                            tool_diameter=tool_diameter,
-                            origin_corner=origin_corner,
-                            rotation=rotation,
-                            use_25d=use_25d,
-                            tab_spacing=tab_spacing,
-                            team_config=team_config,
-                            user_name=user_name,
-                            suggested_filename=part_base_name,
-                            timestamp_str=timestamp_str,
-                        )
-
-                        if not part_result.success:
-                            result = part_result
-                            multi_ok = False
-                            break
-
-                        part_w, part_h = pp.get_part_bounds()
-                        standard_parts.append({
-                            'pp': pp,
-                            'result': part_result,
-                            'part_w': part_w,
-                            'part_h': part_h,
-                            'source_name': part_file.filename,
-                            'base_name': part_base_name,
-                        })
-
-                    if multi_ok and standard_parts:
-                        result = standard_parts[0]['result']
-                        stock_x = standard_parts[0]['pp'].config.machine_x_max
-                        stock_y = standard_parts[0]['pp'].config.machine_y_max
-                        gap = tool_diameter
-
-                        try:
-                            combined_gcode, placements, used_w, used_h, row_count, max_cols = combine_multi_dxf_results(
-                                standard_parts,
-                                stock_x=stock_x,
-                                stock_y=stock_y,
-                                gap=gap,
-                                nest_rotation=nest_rotation,
-                                timestamp_str=timestamp_str,
-                            )
-                        except Exception as combine_error:
-                            result = PostProcessorResult(
-                                success=False,
-                                errors=[str(combine_error)],
-                                warnings=[f"Failed to place multiple DXFs: {combine_error}"],
-                            )
-                        else:
-                            result.gcode = combined_gcode
-                            combined_base = re.sub(r'[^\w\-]+', '_', Path(standard_parts[0]['base_name']).stem).strip('_') or 'Combined_DXF'
-                            safe_timestamp = timestamp_str.replace(' ', '_').replace(':', '-').replace('/', '-') if timestamp_str else datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                            result.filename = f"{combined_base}_combined_{safe_timestamp}.nc"
-                            combined_warnings = []
-                            for part in standard_parts:
-                                combined_warnings.extend(part['result'].warnings)
-                            result.warnings = combined_warnings
-                            result.stats['quantity'] = len(standard_parts)
-                            result.stats['multi_dxf'] = True
-                            result.stats['multi_dxf_parts'] = [part['source_name'] for part in standard_parts]
-                            result.stats['nesting_cols'] = max_cols
-                            result.stats['nesting_rows'] = row_count
-                            result.stats['nesting_rotation'] = nest_rotation if nest_rotation != 'auto' else 'mixed'
-                            result.stats['combined_width'] = used_w
-                            result.stats['combined_height'] = used_h
-                else:
-                    # Existing single-file standard API path
-                    pp = FRCPostProcessor(
-                        material_thickness=thickness,
-                        tool_diameter=tool_diameter,
-                        units='inch',
-                        config=team_config
-                    )
-                    pp.use_25d = use_25d
-                    pp.apply_material_preset(material, machine_id)
-
-                    if user_name:
-                        pp.user_name = user_name
-
-                    pp.tab_spacing = tab_spacing
-                    pp.load_dxf(input_path)
-                    pp.transform_coordinates(origin_corner, rotation)
-                    pp.identify_perimeter_and_pockets()  # Must come BEFORE classify_holes to remove perimeter circles
-                    pp.classify_holes()
-
-                    result = pp.generate_gcode(suggested_filename=base_name, timestamp=timestamp_str)
-
-                    if quantity > 1 and result.success:
-                        part_w, part_h = pp.get_part_bounds()
-                        gap = pp.tool_diameter
-                        stock_x = pp.config.machine_x_max
-                        stock_y = pp.config.machine_y_max
-
-                        def fits(pw, ph):
-                            c = max(1, int(stock_x / (pw + gap)))
-                            r = max(1, int(stock_y / (ph + gap)))
-                            return c, r, c * r
-
-                        cols_0, rows_0, max_0 = fits(part_w, part_h)
-                        cols_90, rows_90, max_90 = fits(part_h, part_w)
-
-                        if nest_rotation == '90':
-                            do_rotate = True
-                        elif nest_rotation == '0':
-                            do_rotate = False
-                        else:
-                            do_rotate = (max_90 > max_0)
-
-                        if do_rotate:
-                            base_gcode = FRCPostProcessor.rotate_gcode_90(result.gcode, part_w, part_h)
-                            slot_w, slot_h = part_h, part_w
-                            cols, rows, max_parts = cols_90, rows_90, max_90
-                            rotation_label = '90°'
-                        else:
-                            base_gcode = result.gcode
-                            slot_w, slot_h = part_w, part_h
-                            cols, rows, max_parts = cols_0, rows_0, max_0
-                            rotation_label = '0°'
-
-                        step_x = slot_w + gap
-                        step_y = slot_h + gap
-
-                        if quantity > max_parts:
-                            result.warnings.append(
-                                f"Requested {quantity} parts but only {max_parts} fit on "
-                                f"{stock_x:.1f}\" x {stock_y:.1f}\" stock "
-                                f"({cols} cols x {rows} rows, rotation={rotation_label}). "
-                                f"Generating {max_parts}."
-                            )
-                            quantity = max_parts
-
-                        def extract_toolpath(gcode_str):
-                            lines = gcode_str.splitlines()
-                            start = next((i for i, l in enumerate(lines)
-                                          if l.strip() and not l.strip().startswith('(')
-                                          and any(c in l for c in ('G0 ', 'G1 ', 'G2 ', 'G3 ',
-                                                                    'G00', 'G01', 'G02', 'G03',
-                                                                    'M3', 'M03'))), 0)
-                            end = next((i for i, l in enumerate(lines)
-                                        if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
-                            return '\n'.join(lines[start:end])
-
-                        combined_blocks = []
-                        copy_num = 0
-                        done = False
-                        for row in range(rows):
-                            if done:
-                                break
-                            for col in range(cols):
-                                if copy_num >= quantity:
-                                    done = True
-                                    break
-                                dx = col * step_x
-                                dy = row * step_y
-                                shifted = FRCPostProcessor.offset_gcode(base_gcode, dx=dx, dy=dy)
-                                if copy_num == 0:
-                                    combined_blocks.append(shifted)
-                                else:
-                                    combined_blocks.append(
-                                        f"( --- Copy {copy_num + 1}: X+{dx:.3f}\" Y+{dy:.3f}\" rot={rotation_label} --- )")
-                                    combined_blocks.append(extract_toolpath(shifted))
-                                copy_num += 1
-
-                        result.gcode = '\n'.join(combined_blocks)
-                        result.stats['quantity'] = quantity
-                        result.stats['nesting_cols'] = cols
-                        result.stats['nesting_rows'] = rows
-                        result.stats['nesting_rotation'] = rotation_label
-
-
-            if not result.success:
-                log(f"❌ Post-processor API failed!")
-                for error in result.errors:
-                    log(f"   Error: {error}")
-                return jsonify({
-                    'error': 'Post-processor failed',
-                    'details': '\n'.join(result.errors)
-                }), 500
-
-            # Write G-code to file
-            output_path = os.path.join(OUTPUT_FOLDER, result.filename)
-            with open(output_path, 'w') as f:
-                f.write(result.gcode)
-
-            log(f"✅ Output file created: {os.path.getsize(output_path)} bytes")
-            log(f"📄 Output file: {output_path}")
-
-            # Register file with token manager for secure access
-            actual_filename = result.filename
-            output_token = file_token_manager.register_file(output_path, actual_filename)
-
-        except Exception as e:
-            log(f"❌ Post-processor API error: {e}")
-            log(traceback.format_exc())
-            return jsonify({
-                'error': 'Post-processor API error',
-                'details': str(e)
-            }), 500
-
-        # Build console output from result stats (for backward compatibility with UI)
-        console_lines = []
-        qty = result.stats.get('quantity', 1)
-        if qty > 1:
-            cols = result.stats.get('nesting_cols', 1)
-            rows = result.stats.get('nesting_rows', 1)
-            rot = result.stats.get('nesting_rotation', '0°')
-            console_lines.append(f"Nesting {qty} copies ({cols} cols x {rows} rows, rotation={rot})")
-        console_lines.append(f"Identified {result.stats.get('num_holes', 0)} millable holes and {result.stats.get('num_pockets', 0)} pockets per copy")
-        console_lines.append(f"Total lines: {result.stats.get('total_lines', 0)}")
-        if 'cycle_time_display' in result.stats:
-            console_lines.append(f"\n⏱️  ESTIMATED_CYCLE_TIME: {result.stats['cycle_time_seconds']:.1f} seconds ({result.stats['cycle_time_display']})")
-        console_output = '\n'.join(console_lines)
-
-        # Build parameters dictionary based on mode
-        parameters = {
-            'thickness': thickness,
-            'tool_diameter': tool_diameter,
-            'origin_corner': origin_corner,
-            'rotation': rotation
+    return normalized;
+}
+
+function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'auto') {
+    const ordered = [...parts].sort((a, b) => b.area - a.area);
+    const placements = [];
+    let xCursor = 0;
+    let yCursor = 0;
+    let rowHeight = 0;
+
+    const chooseRotate = (part) => {
+        if (nestRotation === '90') return true;
+        if (nestRotation === '0') return false;
+        const fitsNormal = part.width <= stockWidth && part.height <= stockHeight;
+        const fitsRotated = part.height <= stockWidth && part.width <= stockHeight;
+        if (fitsRotated && !fitsNormal) return true;
+        if (fitsNormal && !fitsRotated) return false;
+        if (part.width === part.height) return false;
+        return part.height < part.width;
+    };
+
+    for (const part of ordered) {
+        const rotate90 = chooseRotate(part);
+        const slotW = rotate90 ? part.height : part.width;
+        const slotH = rotate90 ? part.width : part.height;
+
+        if (xCursor > 0 && xCursor + slotW > stockWidth) {
+            xCursor = 0;
+            yCursor += rowHeight + gap;
+            rowHeight = 0;
         }
 
-        if is_aluminum_tube:
-            parameters.update({
-                'tube_height': tube_height,
-                'square_end': square_end,
-                'cut_to_length': cut_to_length
-            })
-        else:
-            parameters.update({
-                'tab_spacing': tab_spacing
-            })
-
-        response_data = {
-            'success': True,
-            'filename': output_token,  # Return secure token (not actual filename)
-            'real_filename': actual_filename,  # Real filename for client-side download
-            'gcode': result.gcode,
-            'console': console_output,
-            'parameters': parameters
+        if (yCursor + slotH > stockHeight) {
+            throw new Error(`Not enough stock space for ${part.name}: need ${slotW.toFixed(3)}" × ${slotH.toFixed(3)}" but only ${(stockWidth - xCursor).toFixed(3)}" × ${(stockHeight - yCursor).toFixed(3)}" remained.`);
         }
 
-        # Add cycle time if available
-        if 'cycle_time_display' in result.stats:
-            response_data['cycle_time'] = result.stats['cycle_time_display']
-            response_data['cycle_time_seconds'] = result.stats['cycle_time_seconds']
-
-        # Log metrics
-        team_number = session.get('team_number')
-        user_email = session.get('user_email')
-        metrics.log_event('gcode_generated',
-                         team_number=team_number,
-                         user_email=user_email,
-                         metadata={
-                             'material': material,
-                             'is_tube': is_aluminum_tube,
-                             'from_onshape': request.form.get('fromOnshape', 'false') == 'true'
-                         })
-
-        # Save job to Redis history
-        user_id = session.get('user_email') or session.get('user_id') or request.remote_addr
-        save_job(user_id, {
-            'part_name': base_name,
-            'filename': actual_filename,
-            'material': material,
-            'machine_id': machine_id or 'default',
-            'thickness': thickness,
-            'gcode_lines': result.stats.get('total_lines', 0),
-            'holes': result.stats.get('num_holes', 0),
-            'pockets': result.stats.get('num_pockets', 0),
-            'cycle_time': result.stats.get('cycle_time_display', 'N/A'),
-            'cycle_time_seconds': result.stats.get('cycle_time_seconds', 0),
-            'from_onshape': request.form.get('fromOnshape', 'false') == 'true',
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'gcode': result.gcode,
-        })
-
-        return jsonify(response_data)
-
-    except ValueError as e:
-        return jsonify({'error': f'Invalid parameter value: {str(e)}'}), 400
-    except Exception as e:
-        log(traceback.format_exc())
-        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
-
-@app.route('/download/<token>')
-@limiter.limit("30 per minute")
-def download_file(token):
-    """
-    Download generated G-code file using secure token.
-    Token prevents filename guessing attacks.
-    """
-    try:
-        # Look up file by token
-        file_info = file_token_manager.get_file(token)
-        if not file_info:
-            return jsonify({'error': 'File not found or expired'}), 404
-
-        file_path = file_info['filepath']
-        real_filename = file_info['filename']
-
-        # Verify file still exists on disk
-        if not os.path.exists(file_path):
-            return jsonify({'error': 'File not found'}), 404
-
-        log(f"📥 Download request: token {token[:16]}... → {real_filename}")
-
-        # Log metrics
-        team_number = session.get('team_number')
-        user_email = session.get('user_email')
-        metrics.log_event('download',
-                         team_number=team_number,
-                         user_email=user_email,
-                         metadata={'filename': real_filename})
-
-        return send_file(
-            file_path,
-            as_attachment=True,
-            download_name=real_filename,  # User sees the real filename
-            mimetype='text/plain'
-        )
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/debug/download-dxf')
-@limiter.limit("30 per minute")
-def debug_download_dxf():
-    """
-    Debug endpoint: Download the multi-layer DXF file from the most recent Onshape import.
-    This allows manual testing of the postprocessor with the exact DXF that was generated.
-    """
-    try:
-        # Get DXF token from session
-        dxf_token = session.get('debug_dxf_token')
-        if not dxf_token:
-            return jsonify({
-                'error': 'No debug DXF available',
-                'message': 'Import a part from Onshape first. The DXF is only available for multi-layer (2.5D) imports.'
-            }), 404
-
-        # Look up file by token
-        file_info = file_token_manager.get_file(dxf_token)
-        if not file_info:
-            return jsonify({
-                'error': 'DXF file not found or expired',
-                'message': 'The DXF may have been cleaned up. Import the part again.'
-            }), 404
-
-        file_path = file_info['filepath']
-        real_filename = session.get('debug_dxf_filename', 'debug.dxf')
-
-        # Verify file still exists on disk
-        if not os.path.exists(file_path):
-            return jsonify({'error': 'DXF file no longer exists on disk'}), 404
-
-        log(f"🐛 Debug DXF download: {real_filename} ({os.path.getsize(file_path)} bytes)")
-
-        return send_file(
-            file_path,
-            as_attachment=True,
-            download_name=real_filename,
-            mimetype='application/dxf'
-        )
-    except Exception as e:
-        log(f"❌ Debug DXF download error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-    # Check team config to see if Drive is enabled
-    team_config = session.get('team_config', {})
-    drive_enabled = team_config.get('google_drive_enabled', False)
-    folder_id = team_config.get('google_drive_folder_id')
-
-    if not drive_enabled or not folder_id:
-        return jsonify({
-            'available': True,
-            'enabled': False,
-            'message': 'Google Drive not configured for your team. Add PenguinCAM-config.yaml to enable.'
-        })
-
-    # Check if user is authenticated with Google
-    if AUTH_AVAILABLE and auth.is_enabled():
-        creds = auth.get_credentials()
-        if not creds:
-            return jsonify({
-                'available': True,
-                'enabled': True,
-                'authenticated': False,
-                'message': 'Click "Save to Drive" to authenticate'
-            })
-
-        return jsonify({
-            'available': True,
-            'enabled': True,
-            'authenticated': True,
-            'message': 'Google Drive ready',
-            'folder_id': folder_id
-        })
-    else:
-        return jsonify({
-            'available': True,
-            'enabled': True,
-            'authenticated': False,
-            'message': 'Click "Save to Drive" to authenticate'
-        })
-
-@app.route('/drive/upload/<token>', methods=['POST'])
-@limiter.limit("30 per minute")  # Reasonable limit for uploads
-@auth.require_auth
-def upload_to_drive(token):
-    """Upload a G-code file to Google Drive using secure token"""
-    log(f"📤 Drive upload requested for token: {token[:16]}...")
-
-    if not GOOGLE_DRIVE_AVAILABLE:
-        log("❌ Google Drive integration not available")
-        return jsonify({
-            'success': False,
-            'message': 'Google Drive integration not available'
-        }), 400
-
-    try:
-        # Look up file by token
-        file_info = file_token_manager.get_file(token)
-        if not file_info:
-            log(f"❌ Token not found or expired: {token[:16]}...")
-            return jsonify({
-                'success': False,
-                'message': 'File not found or expired'
-            }), 404
-
-        file_path = file_info['filepath']
-        real_filename = file_info['filename']
-
-        log(f"📂 Looking for file at: {file_path}")
-        log(f"📂 Real filename: {real_filename}")
-        log(f"📂 File exists: {os.path.exists(file_path)}")
-
-        if not os.path.exists(file_path):
-            log(f"❌ File not found: {file_path}")
-            return jsonify({
-                'success': False,
-                'message': 'File not found'
-            }), 404
-        
-        # Get credentials from session
-        creds = None
-        if AUTH_AVAILABLE and auth.is_enabled():
-            log("🔐 Getting credentials from session...")
-            creds = auth.get_credentials()
-            if not creds:
-                log("❌ No credentials in session")
-                return jsonify({
-                    'success': False,
-                    'message': 'Not authenticated with Google Drive'
-                }), 401
-            log(f"✅ Got credentials, scopes: {creds.scopes if hasattr(creds, 'scopes') else 'unknown'}")
-        
-        # Create uploader with credentials
-        log("🔧 Creating GoogleDriveUploader...")
-        uploader = GoogleDriveUploader(credentials=creds)
-        
-        log("🔐 Authenticating...")
-        if not uploader.authenticate():
-            log("❌ Authentication failed")
-            return jsonify({
-                'success': False,
-                'message': 'Failed to authenticate with Google Drive'
-            }), 500
-        
-        log("✅ Authenticated, uploading file...")
-        # Upload the file with real filename
-        result = uploader.upload_file(file_path, real_filename)
-
-        log(f"📤 Upload result: {result}")
-
-        if result and result.get('success'):
-            log(f"✅ Upload successful: {result.get('web_link')}")
-
-            # Log metrics
-            team_number = session.get('team_number')
-            user_email = session.get('user_email')
-            metrics.log_event('drive_save',
-                             team_number=team_number,
-                             user_email=user_email,
-                             metadata={'filename': real_filename})
-
-            return jsonify({
-                'success': True,
-                'message': f'✅ Uploaded: {real_filename}',
-                'file_id': result.get('file_id'),
-                'web_view_link': result.get('web_link')
-            })
-        else:
-            log(f"❌ Upload failed: {result.get('message') if result else 'Unknown error'}")
-            return jsonify({
-                'success': False,
-                'message': result.get('message') if result else 'Upload failed'
-            }), 500
-            
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': f'Upload error: {str(e)}'
-        }), 500
-
-# ============================================================================
-# Onshape Integration Routes
-# ============================================================================
-
-@app.route('/history')
-def job_history():
-    user_id = session.get('user_email') or session.get('user_id') or request.remote_addr
-    jobs = get_jobs(user_id)
-    return render_template('history.html', jobs=jobs)
-
-@app.route('/history/download/<job_id>')
-def history_download(job_id):
-    user_id = session.get('user_email') or session.get('user_id') or request.remote_addr
-    try:
-        key = f"jobs:{user_id}:{job_id}"
-        data = job_redis.get(key)
-        if not data:
-            return jsonify({'error': 'Job not found'}), 404
-        job = json.loads(data)
-        gcode = job.get('gcode', '')
-        filename = job.get('filename', f'{job_id}.nc')
-        from flask import Response
-        return Response(
-            gcode,
-            mimetype='text/plain',
-            headers={'Content-Disposition': f'attachment; filename="{filename}"'}
-        )
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/onshape/auth')
-def onshape_auth():
-    """Start Onshape OAuth flow"""
-    if not ONSHAPE_AVAILABLE:
-        return jsonify({
-            'error': 'Onshape integration not available'
-        }), 400
-
-    try:
-        client = get_onshape_client()
-
-        # Generate state for CSRF protection
-        state = secrets.token_urlsafe(32)
-
-        # Store state in session for verification
-        session['onshape_oauth_state'] = state
-
-        # Get authorization URL
-        auth_url = client.get_authorization_url(state=state)
-
-        # Redirect user to Onshape for authorization
-        return redirect(auth_url)
-        
-    except Exception as e:
-        return jsonify({'error': f'OAuth initialization failed: {str(e)}'}), 500
-
-@app.route('/onshape/oauth/callback')
-def onshape_oauth_callback():
-    """Handle Onshape OAuth callback"""
-    if not ONSHAPE_AVAILABLE:
-        return "Onshape integration not available", 400
-
-    try:
-        # Get authorization code and state
-        code = request.args.get('code')
-        state = request.args.get('state')
-
-        if not code:
-            return "Authorization failed: No code received", 400
-
-        # Verify state (CSRF protection)
-        expected_state = session.get('onshape_oauth_state')
-        if state != expected_state:
-            return "Authorization failed: Invalid state", 400
-
-        # Exchange code for access token
-        client = get_onshape_client()
-        token_data = client.exchange_code_for_token(code)
-
-        if not token_data:
-            return "Authorization failed: Could not get access token", 400
-
-        # Store client in session
-        # In production, you'd want to store tokens in a database
-        user_id = get_current_user_id()
-        session_manager.create_session(user_id, client)
-        session['onshape_authenticated'] = True
-
-        # Fetch user info and team config for session
-        log("\n" + "="*60)
-        log("Fetching user and team config after OAuth")
-        log("="*60)
-
-        # Get user session info
-        user_session = client.get_user_session_info()
-        if user_session:
-            user_name = user_session.get('name')
-            user_email = user_session.get('email')
-            log(f"✅ User: {user_name} ({user_email})")
-            session['user_name'] = user_name
-            session['user_email'] = user_email
-
-        # Check if there's a pending import (came from Onshape extension)
-        pending_import = session.get('pending_onshape_import')
-
-        # Only load config during auth if NOT coming from Onshape extension
-        # (Extension flow will load config during export endpoint)
-        if not pending_import:
-            log("ℹ️  Direct authentication (not from Onshape) - loading config now")
-            config_yaml = client.fetch_config_file()
-            if config_yaml:
-                log(f"🔍 DEBUG: Raw YAML length: {len(config_yaml)} bytes")
-                log(f"🔍 DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
-                team_config = TeamConfig.from_yaml(config_yaml)
-                log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
-                log(f"🔍 DEBUG: team_config._data keys: {list(team_config._data.keys())}")
-                log(f"🔍 DEBUG: team_config._data has 'team' key? {'team' in team_config._data}")
-                if 'team' in team_config._data:
-                    log(f"🔍 DEBUG: team_config._data['team'] = {team_config._data['team']}")
-                session['team_config_data'] = team_config._data
-                session['team_config'] = team_config.to_dict()
-                session['team_number'] = team_config.team_number
-                session['team_config_url'] = getattr(client, 'last_config_url', None)
-                session['using_default_config'] = False
-            else:
-                log("⚠️  No team config found - using defaults")
-                team_config = TeamConfig()
-                session['team_config_data'] = {}
-                session['team_config'] = team_config.to_dict()
-                session['team_number'] = team_config.team_number
-                session.pop('team_config_url', None)
-                session['using_default_config'] = True
-        else:
-            log("ℹ️  Authentication from Onshape extension - will load config during export")
-
-        log("="*60 + "\n")
-
-        # Clean up OAuth state
-        session.pop('onshape_oauth_state', None)
-
-        # Get pending import (if any)
-        pending_import = session.pop('pending_onshape_import', None)
-
-        if pending_import:
-            # Redirect back to import with original parameters
-            params = urlencode({k: v for k, v in pending_import.items() if v})
-            return redirect(f'/onshape/import?{params}')
-
-        # Otherwise redirect to main page with success message
-        return redirect('/?onshape_connected=true')
-        
-    except Exception as e:
-        return f"OAuth callback error: {str(e)}", 500
-
-@app.route('/onshape/status')
-@limiter.limit("30 per minute")
-def onshape_status():
-    """Check Onshape connection status"""
-    if not ONSHAPE_AVAILABLE:
-        return jsonify({
-            'available': False,
-            'connected': False,
-            'message': 'Onshape integration not installed'
-        })
-
-    try:
-        user_id = get_current_user_id()
-        client = session_manager.get_client(user_id)
-
-        if client and client.access_token:
-            # Try to get user info to verify connection
-            user_info = client.get_user_info()
-
-            # Save potentially-refreshed tokens back to session
-            session_manager.update_session_tokens(client)
-
-            return jsonify({
-                'available': True,
-                'connected': True,
-                'user': user_info.get('name') if user_info else 'Unknown'
-            })
-        else:
-            return jsonify({
-                'available': True,
-                'connected': False,
-                'message': 'Not connected to Onshape'
-            })
-
-    except Exception as e:
-        return jsonify({
-            'available': True,
-            'connected': False,
-            'message': f'Error: {str(e)}'
-        })
-
-@app.route('/docs/')
-@app.route('/docs')
-def docs_redirect():
-    """Redirect /docs to the static documentation"""
-    return redirect('/static/docs/index.html')
-
-@app.route('/set-machine', methods=['POST'])
-@limiter.limit("30 per minute")
-def set_machine():
-    """Set the current machine for the session"""
-    try:
-        machine_id = request.json.get('machine_id')
-        if not machine_id:
-            return jsonify({'error': 'No machine_id provided'}), 400
-
-        # Verify machine exists in config
-        team_config_data = session.get('team_config_data', {})
-        team_config = TeamConfig(team_config_data)
-        machines = team_config.get_available_machines()
-
-        if machine_id not in machines:
-            return jsonify({'error': f'Unknown machine: {machine_id}'}), 400
-
-        # Store in session
-        session['machine_id'] = machine_id
-
-        # Return updated config for this machine
-        team_config_dict = team_config.to_dict(machine_id)
-
-        return jsonify({
-            'success': True,
-            'machine_id': machine_id,
-            'machine_name': machines[machine_id].get('name', machine_id),
-            'config': team_config_dict
-        })
-
-    except Exception as e:
-        log(f"Error setting machine: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/debug/session')
-@limiter.limit("30 per minute")
-def debug_session():
-    """Debug endpoint to see session contents (especially team config)"""
-    return jsonify({
-        'user_name': session.get('user_name'),
-        'user_email': session.get('user_email'),
-        'team_name': session.get('team_name'),
-        'team_config': session.get('team_config', {}),
-        'team_config_data_keys': list(session.get('team_config_data', {}).keys()),
-        'onshape_authenticated': session.get('onshape_authenticated'),
-    })
-
-@app.route('/debug/onshape/faces')
-@limiter.limit("10 per minute")
-def debug_onshape_faces():
-    """Debug endpoint to test Onshape face listing"""
-    if not ONSHAPE_AVAILABLE:
-        return jsonify({'error': 'Onshape integration not available'}), 400
-
-    # Get parameters
-    document_id = request.args.get('documentId')
-    workspace_id = request.args.get('workspaceId')
-    element_id = request.args.get('elementId')
-    body_id = request.args.get('bodyId')
-
-    if not all([document_id, workspace_id, element_id]):
-        return jsonify({
-            'error': 'Missing required parameters',
-            'required': ['documentId', 'workspaceId', 'elementId']
-        }), 400
-
-    # Get Onshape client
-    user_id = get_current_user_id()
-    client = session_manager.get_client(user_id)
-
-    if not client:
-        return jsonify({
-            'error': 'Not authenticated with Onshape',
-            'auth_url': '/onshape/auth'
-        }), 401
-
-    try:
-        log("\n" + "="*70)
-        log("DEBUG ENDPOINT: Testing face listing")
-        log("="*70)
-
-        # Test list_faces
-        faces_data = client.list_faces(document_id, workspace_id, element_id)
-
-        if not faces_data:
-            return jsonify({
-                'success': False,
-                'error': 'list_faces returned None'
-            }), 500
-
-        # Test auto_select_top_face
-        face_id, body_id_result, part_name, normal = client.auto_select_top_face(
-            document_id, workspace_id, element_id, body_id, faces_data
-        )
-
-        # Save potentially-refreshed tokens back to session
-        session_manager.update_session_tokens(client)
-
-        return jsonify({
-            'success': True,
-            'faces_data_summary': {
-                'body_count': len(faces_data.get('bodies', [])),
-                'bodies': [
-                    {
-                        'id': body.get('id'),
-                        'name': body.get('properties', {}).get('name'),
-                        'face_count': len(body.get('faces', []))
+        placements.push({
+            name: part.name,
+            rotate90,
+            x: xCursor,
+            y: yCursor,
+            width: slotW,
+            height: slotH,
+            part
+        });
+
+        xCursor += slotW + gap;
+        rowHeight = Math.max(rowHeight, slotH);
+    }
+
+    return placements;
+}
+
+function buildCompositePreviewGeometry(parts, placements, stockWidth, stockHeight) {
+    const entities = [];
+
+    const translateEntity = (entity, dx, dy, rotate90, partBounds) => {
+        const transformed = rotateEntityForPreview(entity, rotate90, partBounds);
+        if (transformed.type === 'LINE') {
+            transformed.vertices = transformed.vertices.map(v => ({ x: v.x + dx, y: v.y + dy }));
+        } else if (transformed.type === 'CIRCLE' || transformed.type === 'ARC') {
+            transformed.center.x += dx;
+            transformed.center.y += dy;
+        } else if (transformed.type === 'LWPOLYLINE' || transformed.type === 'POLYLINE') {
+            transformed.vertices = transformed.vertices.map(v => ({ x: v.x + dx, y: v.y + dy }));
+        } else if (transformed.type === 'SPLINE' && transformed.controlPoints) {
+            transformed.controlPoints = transformed.controlPoints.map(v => ({ x: v.x + dx, y: v.y + dy }));
+        }
+        return transformed;
+    };
+
+    parts.forEach((part, idx) => {
+        const placement = placements[idx];
+        part.geometry.entities.forEach(entity => {
+            entities.push(translateEntity(entity, placement.x, placement.y, placement.rotate90, part.bounds));
+        });
+    });
+
+    // Add the stock outline so the preview clearly shows the sheet boundary.
+    entities.push({ type: 'LINE', vertices: [{ x: 0, y: 0 }, { x: stockWidth, y: 0 }], layer: 'STOCK' });
+    entities.push({ type: 'LINE', vertices: [{ x: stockWidth, y: 0 }, { x: stockWidth, y: stockHeight }], layer: 'STOCK' });
+    entities.push({ type: 'LINE', vertices: [{ x: stockWidth, y: stockHeight }, { x: 0, y: stockHeight }], layer: 'STOCK' });
+    entities.push({ type: 'LINE', vertices: [{ x: 0, y: stockHeight }, { x: 0, y: 0 }], layer: 'STOCK' });
+
+    const bounds = {
+        minX: 0,
+        minY: 0,
+        maxX: stockWidth,
+        maxY: stockHeight,
+        width: stockWidth,
+        height: stockHeight,
+        centerX: stockWidth / 2,
+        centerY: stockHeight / 2
+    };
+
+    return { entities, bounds, transformedParts: placements };
+}
+// ============================================================================
+// Settings Persistence (localStorage)
+// ============================================================================
+
+/**
+ * Default settings for the application
+ */
+const DEFAULT_SETTINGS = {
+    material: 'plywood',
+    thickness: '0.25',
+    tabSpacing: '6.0',
+    tubeHeight: '2.0',
+    squareEnd: true,
+    cutToLength: true,
+    toolDiameter: '0.125',
+    rotationAngle: 0,
+    use25d: false
+};
+
+/**
+ * Save current form settings to localStorage
+ */
+function saveSettings() {
+    const machineSelect = document.getElementById('machineId');
+    const settings = {
+        machineId: machineSelect ? machineSelect.value : null,
+        material: document.getElementById('material').value,
+        thickness: document.getElementById('thickness').value,
+        tabSpacing: document.getElementById('tabSpacing').value,
+        tubeHeight: document.getElementById('tubeHeight').value,
+        use25d: document.getElementById('use25d').checked,
+        squareEnd: document.getElementById('squareEnd').checked,
+        cutToLength: document.getElementById('cutToLength').checked,
+        toolDiameter: document.getElementById('toolDiameter').value,
+        rotationAngle: appState.rotationAngle
+    };
+
+    try {
+        localStorage.setItem('penguinCAM_settings', JSON.stringify(settings));
+    } catch (e) {
+        console.warn('Failed to save settings to localStorage:', e);
+    }
+}
+
+/**
+ * Load settings from localStorage and apply to form
+ */
+function loadSettings() {
+    try {
+        const saved = localStorage.getItem('penguinCAM_settings');
+        const settings = saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
+
+        // Get server-provided default tool diameter from HTML (set by team config)
+        const serverDefaultToolDiameter = document.getElementById('toolDiameter').value;
+
+        // Apply settings to form elements
+        const machineSelect = document.getElementById('machineId');
+        if (machineSelect && settings.machineId) {
+            machineSelect.value = settings.machineId;
+        }
+        document.getElementById('material').value = settings.material || DEFAULT_SETTINGS.material;
+
+
+        // Only load thickness from localStorage if NOT auto-detected from CAD
+        const detectedThickness = window.ONSHAPE_DATA && window.ONSHAPE_DATA.detectedThickness;
+        if (!detectedThickness) {
+            document.getElementById('thickness').value = settings.thickness || DEFAULT_SETTINGS.thickness;
+        }
+        // If detected thickness exists, the HTML already has the correct value - don't override it
+
+        document.getElementById('tabSpacing').value = settings.tabSpacing || DEFAULT_SETTINGS.tabSpacing;
+        document.getElementById('tubeHeight').value = settings.tubeHeight || DEFAULT_SETTINGS.tubeHeight;
+        document.getElementById('squareEnd').checked = settings.squareEnd !== undefined ? settings.squareEnd : DEFAULT_SETTINGS.squareEnd;
+        document.getElementById('cutToLength').checked = settings.cutToLength !== undefined ? settings.cutToLength : DEFAULT_SETTINGS.cutToLength;
+        document.getElementById('use25d').checked = settings.use25d !== undefined ? settings.use25d : DEFAULT_SETTINGS.use25d;
+        // Use saved value if exists, otherwise keep server-provided default
+        document.getElementById('toolDiameter').value = settings.toolDiameter || serverDefaultToolDiameter;
+        appState.rotationAngle = settings.rotationAngle || DEFAULT_SETTINGS.rotationAngle;
+
+        // Trigger material change to show/hide tube params and warnings
+        const materialSelect = document.getElementById('material');
+        if (materialSelect.value === 'aluminum_tube') {
+            document.getElementById('tubeParams').style.display = 'block';
+        }
+        // Trigger change event to check for incomplete materials
+        materialSelect.dispatchEvent(new Event('change'));
+
+        console.log('Settings loaded from localStorage');
+    } catch (e) {
+        console.warn('Failed to load settings from localStorage:', e);
+        // Use defaults if localStorage fails
+        Object.keys(DEFAULT_SETTINGS).forEach(key => {
+            const element = document.getElementById(key);
+            if (element) {
+                if (element.type === 'checkbox') {
+                    element.checked = DEFAULT_SETTINGS[key];
+                } else {
+                    element.value = DEFAULT_SETTINGS[key];
+                }
+            }
+        });
+    }
+}
+
+/**
+ * Attach event listeners to form elements to auto-save on change
+ */
+function setupSettingsAutoSave() {
+        const fields = ['material', 'thickness', 'tabSpacing', 'tubeHeight', 'squareEnd', 'cutToLength', 'toolDiameter', 'use25d'];
+
+    fields.forEach(fieldId => {
+        const element = document.getElementById(fieldId);
+        if (element) {
+            const eventType = element.type === 'checkbox' ? 'change' : 'input';
+            element.addEventListener(eventType, saveSettings);
+        }
+    });
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Create a bounds tracker for calculating min/max coordinates
+ */
+function createBounds() {
+    return {
+        minX: Infinity,
+        maxX: -Infinity,
+        minY: Infinity,
+        maxY: -Infinity,
+        minZ: Infinity,
+        maxZ: -Infinity,
+
+        update(x, y, z) {
+            if (x !== undefined) {
+                this.minX = Math.min(this.minX, x);
+                this.maxX = Math.max(this.maxX, x);
+            }
+            if (y !== undefined) {
+                this.minY = Math.min(this.minY, y);
+                this.maxY = Math.max(this.maxY, y);
+            }
+            if (z !== undefined) {
+                this.minZ = Math.min(this.minZ, z);
+                this.maxZ = Math.max(this.maxZ, z);
+            }
+        },
+
+        isValid() {
+            return this.minX !== Infinity;
+        },
+
+        reset() {
+            this.minX = this.minY = this.minZ = Infinity;
+            this.maxX = this.maxY = this.maxZ = -Infinity;
+        }
+    };
+}
+
+// ============================================================================
+// Part Selection Modal
+// ============================================================================
+
+function selectPart() {
+    const selected = document.querySelector('input[name="partSelection"]:checked');
+    if (selected) {
+        const bodyId = selected.value;
+        const url = new URL(window.location.href);
+        url.searchParams.set('bodyId', bodyId);
+        window.location.href = url.toString();
+    }
+}
+
+// Main application initialization
+document.addEventListener('DOMContentLoaded', () => {
+    // Handle part option selection (visual feedback)
+    const partOptions = document.querySelectorAll('.part-option');
+    partOptions.forEach(option => {
+        option.addEventListener('click', () => {
+            partOptions.forEach(opt => opt.classList.remove('selected'));
+            option.classList.add('selected');
+        });
+    });
+
+    // Load saved settings from localStorage
+        loadSettings();
+
+    // Global state (using appState object for cross-scope access)
+        let scene, camera, renderer, controls;
+        let optimalCameraPosition = { x: 10, y: 10, z: 10 };
+        let optimalLookAtPosition = { x: 0, y: 0, z: 0 };
+
+        // DOM elements
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileLoadedCard = document.getElementById('fileLoadedCard');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const uploadDifferentLink = document.getElementById('uploadDifferentLink');
+        const generateBtn = document.getElementById('generateBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const driveBtn = document.getElementById('driveBtn');
+        const driveStatus = document.getElementById('driveStatus');
+        const loading = document.getElementById('loading');
+        const results = document.getElementById('results');
+        const errorAlert = document.getElementById('errorAlert');
+        const errorMessage = document.getElementById('errorMessage');
+        const stats = document.getElementById('stats');
+        const consoleOutput = document.getElementById('consoleOutput');
+        const materialSelect = document.getElementById('material');
+        const tubeParams = document.getElementById('tubeParams');
+
+        // Handle material type selection - show/hide tube parameters
+        materialSelect.addEventListener('change', (e) => {
+            const isAluminumTube = e.target.value === 'aluminum_tube';
+            const isMultiDepth = isMultiDepthMode();
+
+            // Show/hide warning for incomplete materials
+            const materialWarning = document.getElementById('materialWarning');
+            const selectedOption = e.target.selectedOptions[0];
+            const isIncomplete = selectedOption?.getAttribute('data-incomplete') === 'true';
+            if (materialWarning) {
+                materialWarning.style.display = isIncomplete ? 'block' : 'none';
+            }
+
+            // Update thickness label and default value for aluminum tube
+            // BUT: Do NOT change thickness value in 2.5D mode (it comes from Onshape)
+            const thicknessGroup = document.getElementById('thickness')?.closest('.param-group');
+            const thicknessLabel = thicknessGroup?.querySelector('label');
+            const thicknessInput = document.getElementById('thickness');
+
+            if (thicknessLabel && thicknessInput) {
+                if (isAluminumTube) {
+                    // Change label and default for tube mode
+                    thicknessLabel.innerHTML = `
+                        Tube Wall Thickness (inches)
+                        <span class="label-hint">1/8" = 0.125"</span>
+                    `;
+                    // Only change value in 2D mode, not in 2.5D mode
+                    if (!isMultiDepth) {
+                        thicknessInput.value = '0.125';
                     }
-                    for body in faces_data.get('bodies', [])
-                ]
-            },
-            'auto_selected': {
-                'face_id': face_id,
-                'body_id': body_id_result,
-                'part_name': part_name,
-                'normal': normal
-            } if face_id else None
-        })
-
-    except Exception as e:
-        import traceback
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'traceback': traceback.format_exc()
-        }), 500
-
-@app.route('/onshape/import', methods=['GET', 'POST'])
-@limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
-def onshape_import():
-    """
-    Import a DXF from Onshape
-    Accepts parameters from Onshape extension or direct URL
-    """
-    if not ONSHAPE_AVAILABLE:
-        return jsonify({'error': 'Onshape integration not available'}), 400
-
-    try:
-        log(f"\n{'='*70}")
-        log(f"ONSHAPE IMPORT REQUEST")
-        log(f"{'='*70}")
-        log(f"Request URL: {request.url}")
-
-        # Get parameters (either from query string or JSON body)
-        if request.method == 'POST':
-            raw_params = request.json or {}
-            log(f"Source: POST body (JSON)")
-        else:
-            raw_params = request.args.to_dict()
-            log(f"Source: Query string")
-
-        log(f"\n📝 RAW PARAMETERS RECEIVED:")
-        for key, value in sorted(raw_params.items()):
-            log(f"   {key}: {value!r}")
-
-        params = extract_onshape_params(raw_params)
-
-        log(f"\n🔧 EXTRACTED PARAMETERS:")
-        log(f"   document_id: {params['document_id']!r}")
-        log(f"   workspace_id: {params['workspace_id']!r}")
-        log(f"   element_id: {params['element_id']!r}")
-        log(f"   face_id: {params['face_id']!r}")
-        log(f"   body_id: {params['body_id']!r}")
-
-        document_id = params['document_id']
-        workspace_id = params['workspace_id']
-        element_id = params['element_id']
-        face_id = params['face_id']
-        body_id = params['body_id']  # Optional - for part selection
-
-        # Get Onshape server and user info that IS being sent
-        onshape_server = raw_params.get('server', 'https://cad.onshape.com')
-        onshape_userid = raw_params.get('userId')
-
-        log(f"\n🔍 PARAMETER ANALYSIS:")
-        if face_id:
-            log(f"   ✓ face_id provided: {face_id}")
-            if not face_id.startswith('J'):
-                log(f"   ⚠️  WARNING: face_id doesn't start with 'J' (unusual for Onshape IDs)")
-            if len(face_id) < 10:
-                log(f"   ⚠️  WARNING: face_id seems too short (Onshape IDs are usually longer)")
-        else:
-            log(f"   ℹ️  No face_id - will auto-select")
-
-        if body_id:
-            log(f"   ✓ body_id provided: {body_id}")
-        else:
-            log(f"   ℹ️  No body_id - will search all parts")
-
-        log(f"{'='*70}\n")
-        
-        # WORKAROUND: If params have placeholder strings, we can't proceed
-        if (document_id and ('${' in str(document_id) or document_id.startswith('$'))):
-            log("❌ Onshape variable substitution failed!")
-            log(f"Received literal: documentId={document_id}")
-
-            # Show helpful error page
-            return render_template('index.html',
-                                 error_message='Onshape integration error: Variable substitution not working. Please contact support or use manual DXF upload.',
-                                 debug_info={
-                                     'issue': 'Onshape extension not substituting variables',
-                                     'received_params': str(raw_params),
-                                     'workaround': 'Export DXF manually from Onshape and upload it here'
-                                 },
-                                 using_default_config=session.get('using_default_config', False),
-                                 detected_thickness=None), 400
-
-        if not all([document_id, workspace_id, element_id]):
-            return jsonify({
-                'error': 'Missing required parameters',
-                'required': ['documentId', 'workspaceId', 'elementId'],
-                'received': raw_params,
-                'help': 'Onshape variable substitution not working. Check extension configuration or use manual DXF upload.'
-            }), 400
-
-        # Get Onshape client for this user
-        user_id = get_current_user_id()
-        client = session_manager.get_client(user_id)
-
-        if not client:
-            # Store import parameters in session before redirecting to OAuth
-            session['pending_onshape_import'] = {
-                'documentId': document_id,
-                'workspaceId': workspace_id,
-                'elementId': element_id,
-                'faceId': face_id
-            }
-
-            # Redirect to Onshape OAuth
-            return redirect('/onshape/auth')
-
-        # Reload team config on every export (allows users to update config without re-authenticating)
-        log("\n" + "="*60)
-        log("🔄 Refreshing team config from Onshape...")
-        config_yaml = client.fetch_config_file(document_id=document_id)
-        if config_yaml:
-            log(f"🔍 DEBUG: Raw YAML length: {len(config_yaml)} bytes")
-            log(f"🔍 DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
-            team_config = TeamConfig.from_yaml(config_yaml)
-            log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
-            log(f"🔍 DEBUG: team_config._data keys: {list(team_config._data.keys())}")
-            log(f"🔍 DEBUG: team_config._data has 'team' key? {'team' in team_config._data}")
-            if 'team' in team_config._data:
-                log(f"🔍 DEBUG: team_config._data['team'] = {team_config._data['team']}")
-            session['team_config_data'] = team_config._data
-            session['team_config'] = team_config.to_dict()
-            session['team_number'] = team_config.team_number
-            session['team_config_url'] = getattr(client, 'last_config_url', None)
-            session['using_default_config'] = False
-        else:
-            log("⚠️  No team config found - using defaults")
-            team_config = TeamConfig()
-            session['team_config_data'] = {}
-            session['team_config'] = team_config.to_dict()
-            session['team_number'] = team_config.team_number
-            session.pop('team_config_url', None)
-            session['using_default_config'] = True
-        log("="*60 + "\n")
-
-        # Get document's owning company/classroom (Onshape Education context)
-        # This requires a document, so we fetch it here rather than during OAuth
-        doc_company = client.get_document_company(document_id)
-        if doc_company:
-            team_name = doc_company.get('name')
-            log(f"📚 Document company: {team_name}")
-            session['team_name'] = team_name
-
-        # ── MULTI-PART IMPORT – early exit before face auto-selection ──────
-        # ?multi=true → export every body as its own DXF; skip single-part flow.
-        multi_parts = raw_params.get('multi', 'false').lower() in ('true', '1', 'yes')
-        if multi_parts:
-            multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
-            selected_face_ids_raw = raw_params.get('faceIds', '').strip()
-            selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
-
-            if selected_face_ids:
-                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
-                part_exports = client.export_selected_faces_as_dxfs(
-                    document_id, workspace_id, element_id,
-                    selected_face_ids,
-                    multilayer=multilayer_for_multi
-                )
-                empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
-            else:
-                log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
-                part_exports = client.export_all_parts_as_dxfs(
-                    document_id, workspace_id, element_id,
-                    multilayer=multilayer_for_multi
-                )
-                empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
-
-            if not part_exports:
-                return jsonify({
-                    'error': 'No parts could be exported from this document',
-                    'message': empty_message
-                }), 500
-
-            dxf_files_inline = []
-            for part in part_exports:
-                raw = part['content']
-                text = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
-                dxf_files_inline.append({'filename': part['filename'], 'content': text})
-
-            log(f"\u2705 Multi-part export: {len(dxf_files_inline)} DXF(s) ready")
-            session_manager.update_session_tokens(client)
-
-            team_config_data = session.get('team_config_data', {})
-            team_config = TeamConfig(team_config_data)
-            machines = team_config.get_available_machines()
-            current_machine_id = session.get('machine_id', team_config.default_machine_id)
-            team_config_dict = team_config.to_dict(current_machine_id)
-            drive_enabled = team_config_dict.get('google_drive_enabled', False)
-            machine_x_max = team_config_dict.get('machine_x_max', 48.0)
-            machine_y_max = team_config_dict.get('machine_y_max', 96.0)
-            default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
-            available_materials = team_config.get_available_materials(current_machine_id)
-            available_materials['aluminum_tube'] = {
-                **available_materials.get('aluminum', {}), 'name': 'Aluminum Tube'
-            }
-            incomplete_materials = {
-                mid for mid in available_materials
-                if not team_config.is_material_complete(mid, current_machine_id) and mid != 'aluminum_tube'
-            }
-
-            return render_template('index.html',
-                                 dxf_file='', dxf_content_inline=None,
-                                 dxf_files_inline=dxf_files_inline,
-                                 from_onshape=True, document_id=document_id,
-                                 face_id='', suggested_filename='Onshape_selected_import' if selected_face_ids else 'Onshape_multi_import', detected_thickness=None,
-                                 user_name=session.get('user_name'), team_name=session.get('team_name'),
-                                 drive_enabled=drive_enabled, machine_x_max=machine_x_max,
-                                 machine_y_max=machine_y_max, default_tool_diameter=default_tool_diameter,
-                                 using_default_config=session.get('using_default_config', False),
-                                 machines=machines, current_machine_id=current_machine_id,
-                                 materials=available_materials, incomplete_materials=incomplete_materials)
-        # ── END MULTI-PART IMPORT ────────────────────────────────────────────
-
-        # If no face_id provided, auto-select the top face
-        part_name_from_body = None
-        auto_selected_body_id = None
-        face_normal = None  # Initialize face_normal for when face_id is provided
-        if not face_id:
-            log("No face ID provided, auto-selecting top face...")
-
-            try:
-                # First, try to list all faces for debugging
-                faces_data = client.list_faces(document_id, workspace_id, element_id)
-
-                if not faces_data:
-                    error_msg = "Failed to retrieve data from Onshape. Your authentication token may have expired. Please re-authenticate with Onshape."
-                    log(f"❌ {error_msg}")
-                    return render_template('index.html',
-                                         error_message=error_msg,
-                                         from_onshape=True,
-                                         using_default_config=session.get('using_default_config', False),
-                                         detected_thickness=None), 401
-
-                body_count = len(faces_data.get('bodies', []))
-                log(f"📊 Found {body_count} bodies/parts in document")
-
-                # If multiple parts and no bodyId specified, show part selection modal
-                if body_count > 1 and not body_id:
-                    log("🔍 Multiple parts detected, showing part selector...")
-
-                    # Get detailed info about each part (reuse cached faces_data)
-                    part_selection_data = []
-
-                    # Get body faces using cached data to avoid duplicate API call
-                    bodies_with_faces = client.get_body_faces(document_id, workspace_id, element_id, cached_faces_data=faces_data)
-
-                    if not bodies_with_faces:
-                        error_msg = "Failed to retrieve body/face data from Onshape. Your authentication may have expired."
-                        log(f"❌ {error_msg}")
-                        return render_template('index.html',
-                                             error_message=error_msg,
-                                             from_onshape=True,
-                                             using_default_config=session.get('using_default_config', False),
-                                             detected_thickness=None), 401
-
-                    # Find the largest part by top face area
-                    largest_body_id = None
-                    largest_area = 0
-
-                    for bid, body_data in bodies_with_faces.items():
-                        # Get all planar faces
-                        planar_faces = [f for f in body_data['faces'] if f['surfaceType'] == 'PLANE']
-
-                        if planar_faces:
-                            # Find largest planar face
-                            largest_face = max(planar_faces, key=lambda f: f.get('area', 0))
-                            face_area = largest_face.get('area', 0)
-
-                            if face_area > largest_area:
-                                largest_area = face_area
-                                largest_body_id = bid
-
-                        part_selection_data.append({
-                            'body_id': bid,
-                            'name': body_data['name'],
-                            'face_count': len(body_data['faces']),
-                            'is_largest': False  # Will set this after loop
-                        })
-
-                    # Mark the largest part
-                    for part in part_selection_data:
-                        if part['body_id'] == largest_body_id:
-                            part['is_largest'] = True
-                            break
-
-                    # Sort by size (largest first)
-                    part_selection_data.sort(key=lambda p: p['face_count'] * (1 if p['is_largest'] else 0), reverse=True)
-
-                    # Render template with part selection
-                    return render_template('index.html',
-                                         part_selection={
-                                             'parts': part_selection_data,
-                                             'document_id': document_id,
-                                             'workspace_id': workspace_id,
-                                             'element_id': element_id
-                                         },
-                                         from_onshape=True,
-                                         using_default_config=session.get('using_default_config', False),
-                                         detected_thickness=None)
-
-                # This now returns (face_id, body_id, part_name, normal)
-                # Pass body_id if user selected a specific part in Onshape, and cached data to avoid duplicate API call
-                face_id, auto_selected_body_id, part_name_from_body, face_normal = client.auto_select_top_face(document_id, workspace_id, element_id, body_id, faces_data)
-
-                if not face_id:
-                    # Provide helpful error with face list
-                    error_msg = 'No horizontal plane faces found. '
-                    if faces_data:
-                        face_count = len(faces_data.get('bodies', []))
-                        error_msg += f'Found {face_count} bodies total. '
-                    error_msg += 'Try selecting a face manually in Onshape.'
-
-                    # Render error page instead of JSON
-                    return render_template('index.html',
-                                         error_message=error_msg,
-                                         from_onshape=True,
-                                         debug_info={
-                                             'documentId': document_id,
-                                             'workspaceId': workspace_id,
-                                             'elementId': element_id,
-                                             'bodies_found': face_count if faces_data else 0
-                                         },
-                                         using_default_config=session.get('using_default_config', False),
-                                         detected_thickness=None), 400
-
-                log(f"Auto-selected face: {face_id} from part: {part_name_from_body}")
-
-            except Exception as e:
-                log(f"Error in face detection: {str(e)}")
-                return jsonify({
-                    'error': 'Face detection failed',
-                    'message': str(e)
-                }), 400
-        else:
-            # face_id was provided (e.g., from element panel), but we need to fetch the face normal
-            face_normal, auto_selected_body_id, part_name_from_body = fetch_face_normal_and_body(
-                client, document_id, workspace_id, element_id, face_id, body_id
-            )
-
-        # Check if multi-layer export is requested (default: true)
-        multilayer = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
-
-        # Fetch DXF from Onshape
-        # Use body_id from URL parameter if provided, otherwise use the one from auto-selection
-        export_body_id = body_id if body_id else auto_selected_body_id
-        log(f"Exporting with body_id: {export_body_id} (from {'URL param' if body_id else 'auto-selection'})")
-
-        if multilayer:
-            log("🔷 Multi-layer export requested")
-
-            # For multi-layer export, we need the reference face normal and origin
-            if not face_normal:
-                log("⚠️  No face normal available, fetching...")
-                faces_data = client.list_faces(document_id, workspace_id, element_id)
-
-                if not faces_data:
-                    error_msg = "Failed to retrieve face data from Onshape. Your authentication token may have expired. Please re-authenticate with Onshape."
-                    log(f"❌ {error_msg}")
-                    return jsonify({'error': error_msg}), 401
-
-                # Find the reference face
-                reference_face = None
-
-                # If face_id is provided, find that specific face
-                if face_id:
-                    for body in faces_data.get('bodies', []):
-                        if export_body_id and body.get('id') != export_body_id:
-                            continue
-                        for face in body.get('faces', []):
-                            if face.get('id') == face_id:
-                                reference_face = face
-                                break
-                        if reference_face:
-                            break
-                else:
-                    # No face_id provided (one-click flow): auto-select largest upward-facing plane
-                    log("⚠️  No face_id provided, auto-selecting reference face...")
-                    largest_area = 0
-                    for body in faces_data.get('bodies', []):
-                        if export_body_id and body.get('id') != export_body_id:
-                            continue
-                        for face in body.get('faces', []):
-                            surface = face.get('surface', {})
-                            if surface.get('type') == 'PLANE':
-                                normal = surface.get('normal', {})
-                                # Check if pointing up (z > 0.9)
-                                if normal.get('z', 0) > 0.9:
-                                    area = face.get('area', 0)
-                                    if area > largest_area:
-                                        largest_area = area
-                                        reference_face = face
-                                        face_id = face.get('id')  # Update face_id for later use
-
-                    if reference_face:
-                        log(f"✅ Auto-selected reference face: {face_id} (area: {largest_area:.6f} m²)")
-
-                if reference_face:
-                    surface = reference_face.get('surface', {})
-                    face_normal = surface.get('normal', {'x': 0, 'y': 0, 'z': 1})
-                else:
-                    log("❌ Could not find reference face for multi-layer export")
-                    return jsonify({'error': 'Could not find reference face for multi-layer export. Please select a flat top face.'}), 500
-
-            # Get reference origin from face
-            faces_data = client.list_faces(document_id, workspace_id, element_id)
-
-            if not faces_data:
-                error_msg = "Failed to retrieve face data from Onshape. Your authentication token may have expired. Please re-authenticate with Onshape."
-                log(f"❌ {error_msg}")
-                return jsonify({'error': error_msg}), 401
-
-            reference_origin = None
-            for body in faces_data.get('bodies', []):
-                if export_body_id and body.get('id') != export_body_id:
-                    continue
-                for face in body.get('faces', []):
-                    if face.get('id') == face_id:
-                        surface = face.get('surface', {})
-                        reference_origin = surface.get('origin', {'x': 0, 'y': 0, 'z': 0})
-                        break
-                if reference_origin:
-                    break
-
-            if not reference_origin:
-                log("⚠️  Could not find reference origin, using default")
-                reference_origin = {'x': 0, 'y': 0, 'z': 0}
-
-            # Export multi-layer DXF
-            result = client.export_multilayer_dxf(
-                document_id, workspace_id, element_id,
-                face_id, export_body_id, face_normal, reference_origin,
-                body_id=export_body_id, cached_faces_data=faces_data
-            )
-            # Unpack tuple: (dxf_content, detected_thickness)
-            if isinstance(result, tuple):
-                dxf_content, detected_thickness = result
-            else:
-                # Backwards compatibility if export function doesn't return thickness
-                dxf_content = result
-                detected_thickness = None
-        else:
-            log("📄 Single-layer export")
-            dxf_content = client.export_face_to_dxf(
-                document_id, workspace_id, element_id, face_id, export_body_id, face_normal
-            )
-            detected_thickness = None  # Not applicable for single-layer
-
-        if not dxf_content:
-            error_msg = f"Failed to export DXF from Onshape. "
-            if export_body_id:
-                error_msg += f"Attempted to export body/part: {export_body_id}. "
-            else:
-                error_msg += "No body/part ID available for export. "
-            error_msg += "Check Onshape API logs above for details."
-
-            return jsonify({
-                'error': 'Failed to export DXF from Onshape',
-                'message': error_msg,
-                'details': {
-                    'face_id': face_id,
-                    'body_id': export_body_id,
-                    'document_id': document_id,
-                    'element_id': element_id
+                } else {
+                    // Standard label and default
+                    thicknessLabel.innerHTML = `
+                        Material Thickness (inches)
+                        <span class="label-hint">1/4" = 0.25</span>
+                    `;
+                    // Only change value in 2D mode, not in 2.5D mode
+                    if (!isMultiDepth) {
+                        thicknessInput.value = '0.25';
+                    }
                 }
-            }), 500
-        
-        log(f"📄 DXF content received: {len(dxf_content)} bytes")
+            }
 
-        # Generate filename: try to combine document name + part name
-        doc_name = None
+            // Update form visibility (tube params, tabs, etc.) based on mode
+            updateFormVisibility();
+        });
 
-        # Try to get document name (optional, may fail with 404)
-        try:
-            log("📝 Attempting to fetch document name...")
-            doc_info = client.get_document_info(document_id)
-            if doc_info:
-                doc_name = doc_info.get('name')
-                log(f"   ✅ Got document name: {doc_name}")
-            else:
-                log(f"   ⚠️  Document API returned None")
-        except Exception as e:
-            log(f"   ⚠️  Document API failed (will use part name only): {e}")
+        // Handle machine selection change
+        const machineSelect = document.getElementById('machineId');
+        if (machineSelect) {
+            machineSelect.addEventListener('change', async (e) => {
+                const machineId = e.target.value;
+                console.log('Machine changed to:', machineId);
 
-        # Save potentially-refreshed tokens back to session
-        session_manager.update_session_tokens(client)
+                try {
+                    // Update session with new machine
+                    const response = await fetch('/set-machine', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ machine_id: machineId })
+                    });
 
-        # Build filename from whatever we have
-        suggested_filename = generate_onshape_filename(doc_name, part_name_from_body)
-        log(f"✅ Generated filename: {suggested_filename}.nc")
+                    if (response.ok) {
+                        const data = await response.json();
+                        console.log('Machine updated:', data.machine_name);
 
-        # Save DXF to temp file in uploads folder
-        temp_dxf = tempfile.NamedTemporaryFile(
-            suffix='.dxf',
-            dir=UPLOAD_FOLDER,
-            delete=False
-        )
-        temp_dxf.write(dxf_content)
-        temp_dxf.close()
-
-        dxf_filename = os.path.basename(temp_dxf.name)
-        dxf_path = temp_dxf.name
-
-        log(f"✅ DXF imported from Onshape: {dxf_filename}")
-        log(f"📂 Saved to: {dxf_path}")
-        log(f"📏 File size on disk: {os.path.getsize(dxf_path)} bytes")
-
-        # Log metrics
-        team_number = session.get('team_number')
-        user_email = session.get('user_email')
-        metrics.log_event('onshape_import',
-                         team_number=team_number,
-                         user_email=user_email,
-                         metadata={
-                             'document_name': doc_name,
-                             'part_name': part_name_from_body
-                         })
-
-        # Register DXF file with token manager for secure access
-        dxf_token = file_token_manager.register_file(dxf_path, f"{suggested_filename}.dxf")
-        log(f"🔗 Will be served at: /uploads/{dxf_token[:16]}...")
-
-        # Store DXF token in session for debug downloads
-        session['debug_dxf_token'] = dxf_token
-        session['debug_dxf_filename'] = f"{suggested_filename}.dxf"
-        log(f"🐛 Debug DXF available at: /debug/download-dxf")
-
-        # Embed DXF content directly in page to avoid cross-instance file serving issues on Vercel
-        import base64
-        with open(dxf_path, 'r', errors='replace') as f:
-            dxf_content_inline = f.read()
-        log(f"📄 Embedding DXF inline ({len(dxf_content_inline)} chars)")
-
-        # Render main page with DXF auto-loaded
-        # The frontend will detect the dxf_file parameter and auto-upload it
-
-        # Reconstruct TeamConfig to get materials list
-        team_config_data = session.get('team_config_data', {})
-        team_config = TeamConfig(team_config_data)
-
-        # Get available machines
-        machines = team_config.get_available_machines()
-
-        # Get current machine (from session, or use default)
-        current_machine_id = session.get('machine_id', team_config.default_machine_id)
-
-        # Get machine-specific config dict
-        team_config_dict = team_config.to_dict(current_machine_id)
-        drive_enabled = team_config_dict.get('google_drive_enabled', False)
-        machine_x_max = team_config_dict.get('machine_x_max', 48.0)
-        machine_y_max = team_config_dict.get('machine_y_max', 96.0)
-        default_tool_diameter = team_config_dict.get('default_tool_diameter', 0.157)
-
-        # Get user/team info
-        user_name = session.get('user_name')
-        team_name = session.get('team_name')
-
-        # Get available materials for current machine
-        available_materials = team_config.get_available_materials(current_machine_id)
-
-        # Add 'aluminum_tube' as a special UI-only material (uses aluminum preset)
-        available_materials['aluminum_tube'] = {
-            **available_materials.get('aluminum', {}),
-            'name': 'Aluminum Tube'
+                        // Reload page to get machine-specific materials and settings
+                        window.location.reload();
+                    } else {
+                        console.error('Failed to update machine');
+                    }
+                } catch (error) {
+                    console.error('Error updating machine:', error);
+                }
+            });
         }
 
-        # Check for incomplete materials
-        incomplete_materials = {
-            material_id for material_id in available_materials.keys()
-            if not team_config.is_material_complete(material_id, current_machine_id) and material_id != 'aluminum_tube'
+        // Handle settings dropdown
+        const settingsBtn = document.getElementById('settingsBtn');
+        const settingsDropdown = document.getElementById('settingsDropdown');
+        const downloadConfigBtn = document.getElementById('downloadConfigBtn');
+
+        if (settingsBtn && settingsDropdown) {
+            // Toggle dropdown on settings button click
+            settingsBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const isVisible = settingsDropdown.style.display === 'block';
+                settingsDropdown.style.display = isVisible ? 'none' : 'block';
+            });
+
+            // Close dropdown when clicking outside
+            document.addEventListener('click', (e) => {
+                if (!settingsBtn.contains(e.target) && !settingsDropdown.contains(e.target)) {
+                    settingsDropdown.style.display = 'none';
+                }
+            });
+
+            // Handle download config template
+            if (downloadConfigBtn) {
+                downloadConfigBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    console.log('Downloading config template...');
+                    window.location.href = '/download-config-template';
+                    settingsDropdown.style.display = 'none';
+                });
+            }
         }
 
-        return render_template('index.html',
-                             dxf_file=dxf_token,  # Pass token instead of filename
-                             dxf_content_inline=dxf_content_inline,  # Inline DXF for Vercel
-                             from_onshape=True,
-                             document_id=document_id,
-                             face_id=face_id,
-                             suggested_filename=suggested_filename or '',
-                             detected_thickness=detected_thickness,  # Auto-detected part thickness (multilayer only)
-                             user_name=user_name,
-                             team_name=team_name,
-                             drive_enabled=drive_enabled,
-                             machine_x_max=machine_x_max,
-                             machine_y_max=machine_y_max,
-                             default_tool_diameter=default_tool_diameter,
-                             using_default_config=session.get('using_default_config', False),
-                             machines=machines,
-                             current_machine_id=current_machine_id,
-                             materials=available_materials,
-                             incomplete_materials=incomplete_materials)
-        
-    except Exception as e:
-        return jsonify({
-            'error': f'Import failed: {str(e)}'
-        }), 500
+        // Check Google Drive availability
+        let driveAvailable = false;
+        async function checkDriveStatus() {
+            try {
+                const response = await fetch('/drive/status');
+                const data = await response.json();
 
-@app.route('/onshape/save-dxf', methods=['GET', 'POST'])
-@limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
-def onshape_save_dxf():
-    """
-    Save a DXF from Onshape directly to Google Drive without generating G-code.
-    Accepts parameters from Onshape extension or direct URL.
-    """
-    if not ONSHAPE_AVAILABLE:
-        return jsonify({'error': 'Onshape integration not available'}), 400
-
-    if not GOOGLE_DRIVE_AVAILABLE:
-        return jsonify({'error': 'Google Drive integration not available'}), 400
-
-    try:
-        log(f"\n💾 Onshape Save DXF request: {request.url}")
-        log(f"   Method: {request.method}")
-
-        # Get parameters (either from query string or JSON body)
-        if request.method == 'POST':
-            raw_params = request.json or {}
-        else:
-            raw_params = request.args.to_dict()
-
-        params = extract_onshape_params(raw_params)
-        document_id = params['document_id']
-        workspace_id = params['workspace_id']
-        element_id = params['element_id']
-        face_id = params['face_id']
-        body_id = params['body_id']
-
-        log(f"Onshape params: doc={document_id}, workspace={workspace_id}, element={element_id}, face={face_id}, body={body_id}")
-
-        if not all([document_id, workspace_id, element_id]):
-            return jsonify({
-                'error': 'Missing required parameters',
-                'required': ['documentId', 'workspaceId', 'elementId']
-            }), 400
-
-        # Get Onshape client
-        user_id = get_current_user_id()
-        client = session_manager.get_client(user_id)
-
-        if not client:
-            return jsonify({
-                'error': 'Not authenticated with Onshape',
-                'auth_url': '/onshape/auth'
-            }), 401
-
-        # Auto-select face if needed (use existing helper function)
-        part_name_from_body = None
-        auto_selected_body_id = None
-        face_normal = None
-
-        if not face_id:
-            log("No face ID, auto-selecting top face...")
-            try:
-                # Use existing auto_select_top_face helper
-                face_id, auto_selected_body_id, part_name_from_body, face_normal = client.auto_select_top_face(
-                    document_id, workspace_id, element_id, body_id
-                )
-
-                if not face_id:
-                    return jsonify({
-                        'error': 'Could not auto-select a face',
-                        'message': 'No top face found on any part'
-                    }), 400
-
-            except Exception as e:
-                log(f"Error in face detection: {str(e)}")
-                return jsonify({
-                    'error': 'Face detection failed',
-                    'message': str(e)
-                }), 400
-        else:
-            # face_id was provided (e.g., from element panel), but we need to fetch the face normal
-            face_normal, auto_selected_body_id, part_name_from_body = fetch_face_normal_and_body(
-                client, document_id, workspace_id, element_id, face_id, body_id
-            )
-
-        # Export DXF from Onshape
-        export_body_id = body_id if body_id else auto_selected_body_id
-        log(f"Exporting DXF with body_id: {export_body_id}")
-
-        dxf_content = client.export_face_to_dxf(
-            document_id, workspace_id, element_id, face_id, export_body_id, face_normal
-        )
-
-        if not dxf_content:
-            return jsonify({
-                'error': 'Failed to export DXF from Onshape',
-                'details': {
-                    'face_id': face_id,
-                    'body_id': export_body_id
+                if (data.available && data.enabled) {
+                    driveAvailable = true;
+                    driveBtn.style.display = 'inline-block';
                 }
-            }), 500
+                // Don't show Drive warnings during DXF setup - only relevant after G-code generation
+            } catch (error) {
+                // Drive integration not available - that's okay
+                console.log('Google Drive integration not available');
+            }
+        }
+        checkDriveStatus();
 
-        log(f"📄 DXF exported: {len(dxf_content)} bytes")
+        // Setup auto-save for settings
+        setupSettingsAutoSave();
 
-        # Generate filename with timestamp
-        doc_name = None
-        try:
-            doc_info = client.get_document_info(document_id)
-            if doc_info:
-                doc_name = doc_info.get('name')
-                log(f"📝 Document name: {doc_name}")
-        except Exception as e:
-            log(f"⚠️  Could not get document name: {e}")
+        // File upload handling
+        dropZone.addEventListener('click', () => fileInput.click());
 
-        # Save potentially-refreshed tokens back to session
-        session_manager.update_session_tokens(client)
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
 
-        base_filename = generate_onshape_filename(doc_name, part_name_from_body)
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
 
-        # Add timestamp (server's local time)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        dxf_filename = f"{base_filename}_{timestamp}.dxf"
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const files = Array.from(e.dataTransfer.files || []);
+            if (files.length > 0) {
+                handleFiles(files);
+            }
+        });
 
-        log(f"✅ Generated filename: {dxf_filename}")
+        fileInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files || []);
+            if (files.length > 0) {
+                handleFiles(files);
+            }
+        });
 
-        # Save DXF to temp file
-        temp_dxf = tempfile.NamedTemporaryFile(
-            suffix='.dxf',
-            dir=OUTPUT_FOLDER,  # Use OUTPUT_FOLDER so it's accessible for upload
-            delete=False
-        )
-        temp_dxf.write(dxf_content)
-        temp_dxf.close()
+        function handleFiles(files) {
+            const dxfFiles = files.filter(file => file.name.toLowerCase().endsWith('.dxf'));
+            if (dxfFiles.length === 0) {
+                showError('Invalid file type', 'Please upload one or more DXF files.');
+                return;
+            }
 
-        dxf_path = temp_dxf.name
-        log(f"💾 Saved temp DXF: {dxf_path}")
+            // Store in appState for access across scopes
+            appState.uploadedFiles = dxfFiles;
+            appState.uploadedFile = dxfFiles[0];
+            if (dxfFiles.length === 1) {
+                fileName.textContent = dxfFiles[0].name;
+                fileSize.textContent = formatFileSize(dxfFiles[0].size);
+            } else {
+                const totalBytes = dxfFiles.reduce((sum, file) => sum + file.size, 0);
+                fileName.textContent = `${dxfFiles.length} DXF files selected`;
+                fileSize.textContent = `${formatFileSize(totalBytes)} total`;
+            }
 
-        # Upload to Google Drive
-        creds = None
-        if AUTH_AVAILABLE and auth.is_enabled():
-            creds = auth.get_credentials()
-            if not creds:
-                os.unlink(dxf_path)  # Clean up temp file
-                return jsonify({
-                    'error': 'Not authenticated with Google Drive'
-                }), 401
+            // Show file loaded card, hide drop zone
+            dropZone.style.display = 'none';
+            fileLoadedCard.style.display = 'block';
 
-        uploader = GoogleDriveUploader(credentials=creds)
+            generateBtn.disabled = false;
+            generateBtn.textContent = '🚀 Generate Program';
+            hideError();
+            hideResults();
 
-        if not uploader.authenticate():
-            os.unlink(dxf_path)  # Clean up temp file
-            return jsonify({
-                'error': 'Failed to authenticate with Google Drive'
-            }), 500
+            // Read DXF file(s) for setup mode
+            if (dxfFiles.length > 1) {
+                buildNestedPreviewFromFiles(dxfFiles).catch(error => {
+                    console.error('Failed to build composite preview:', error);
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        parseDxfForSetup(e.target.result);
+                    };
+                    reader.readAsText(dxfFiles[0]);
+                });
+            } else {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    parseDxfForSetup(e.target.result);
+                };
+                reader.readAsText(dxfFiles[0]);
+            }
+        }
 
-        log("📤 Uploading to Google Drive...")
-        result = uploader.upload_file(dxf_path, dxf_filename)
+        // Handle "Upload a different file" link
+        if (uploadDifferentLink) {
+            uploadDifferentLink.addEventListener('click', (e) => {
+                e.preventDefault();
+                fileInput.click();
+            });
+        }
 
-        # Clean up temp file
-        try:
-            os.unlink(dxf_path)
-        except:
-            pass
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' bytes';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
 
-        if result and result.get('success'):
-            log(f"✅ Upload successful: {result.get('web_link')}")
-            return jsonify({
-                'success': True,
-                'message': f'✅ DXF saved to Google Drive: {dxf_filename}',
-                'filename': dxf_filename,
-                'file_id': result.get('file_id'),
-                'web_view_link': result.get('web_link')
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Upload to Google Drive failed',
-                'message': result.get('message') if result else 'Unknown error'
-            }), 500
+        // Generate G-code
+        generateBtn.addEventListener('click', async () => {
+            console.log('🔍 Generate button clicked');
+            const filesToUpload = (appState.uploadedFiles && appState.uploadedFiles.length > 0)
+                ? appState.uploadedFiles
+                : (appState.uploadedFile ? [appState.uploadedFile] : []);
 
-    except Exception as e:
-        log(f"❌ Error in save-dxf: {str(e)}")
-        log(traceback.format_exc())
-        return jsonify({
-            'error': f'Save DXF failed: {str(e)}'
-        }), 500
+            console.log('📂 appState.uploadedFiles:', filesToUpload);
 
-@app.route('/onshape/element-panel')
-def onshape_element_panel():
-    """
-    Serve the Onshape element right panel extension
-    This page will be embedded as an iframe in Onshape
-    """
-    # Get Onshape context from query parameters
-    # These are passed by Onshape when the iframe loads
-    document_id = request.args.get('documentId', '')
-    workspace_id = request.args.get('workspaceId', '')
-    element_id = request.args.get('elementId', '')
-    server = request.args.get('server', 'https://cad.onshape.com')
+            if (!filesToUpload.length) {
+                console.error('❌ No file in appState.uploadedFiles');
+                return;
+            }
 
-    return render_template('onshape_panel.html',
-                         document_id=document_id,
-                         workspace_id=workspace_id,
-                         element_id=element_id,
-                         server=server)
+            const formData = new FormData();
+            if (filesToUpload.length === 1) {
+                formData.append('file', filesToUpload[0]);
+                console.log('✅ FormData created with file:', filesToUpload[0].name);
+            } else {
+                filesToUpload.forEach((file) => {
+                    formData.append('files', file, file.name);
+                });
+                console.log(`✅ FormData created with ${filesToUpload.length} files`);
+            }
 
-# ============================================================================
-# ADMIN ENDPOINTS (Metrics)
-# ============================================================================
+            const use25d = document.getElementById('use25d')?.checked || false;
+            formData.append('use25d', use25d ? 'true' : 'false');
+            // Single-layer DXFs are allowed in 2.5D mode — the geometry is treated as
+            // the perimeter/profile and depth comes from the thickness field.
+            
+            // Generate timestamp in user's local timezone
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hour = String(now.getHours()).padStart(2, '0');
+            const minute = String(now.getMinutes()).padStart(2, '0');
+            const second = String(now.getSeconds()).padStart(2, '0');
+            const timestamp = `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+            formData.append('timestamp', timestamp);
 
-def require_admin():
-    """Check if current user is authorized to access admin endpoints."""
-    admin_email = os.environ.get('ADMIN_EMAIL')
-    if not admin_email:
-        return jsonify({'error': 'Admin access not configured'}), 500
+            // Add machine ID if multiple machines available
+            const machineSelect = document.getElementById('machineId');
+            if (machineSelect) {
+                formData.append('machine_id', machineSelect.value);
+            }
 
-    user_email = session.get('user_email')
-    if not user_email:
-        return jsonify({'error': 'Unauthorized - not logged in'}), 403
+            const material = document.getElementById('material').value;
+            formData.append('material', material);
+            formData.append('tool_diameter', document.getElementById('toolDiameter').value);
+            formData.append('origin_corner', 'bottom-left'); // Always bottom-left
 
-    if user_email != admin_email:
-        return jsonify({'error': 'Unauthorized'}), 403
+            // Add material-specific parameters
+            if (material === 'aluminum_tube') {
+                // Tube-specific parameters
+                formData.append('thickness', document.getElementById('thickness').value); // Tube wall thickness
+                formData.append('tube_height', document.getElementById('tubeHeight').value);
+                formData.append('square_end', document.getElementById('squareEnd').checked ? '1' : '0');
+                formData.append('cut_to_length', document.getElementById('cutToLength').checked ? '1' : '0');
+            } else {
+                // Standard parameters
+                formData.append('thickness', document.getElementById('thickness').value);
+                formData.append('tab_spacing', document.getElementById('tabSpacing').value);
+            }
+            formData.append('rotation', rotationAngle); // Add rotation angle
+            const quantityVal = parseInt(document.getElementById('quantity')?.value || '1', 10);
+            formData.append('quantity', filesToUpload.length > 1 ? '1' : Math.max(1, quantityVal));
+            const nestRotationVal = document.getElementById('nestRotation')?.value || 'auto';
+            formData.append('nest_rotation', nestRotationVal);
+            if (appState.suggestedFilename) {
+                formData.append('suggested_filename', appState.suggestedFilename); // Onshape filename
+            }
 
-    return None  # Success
+            showLoading();
+            hideError();
+            hideResults();
 
-@app.route('/admin/metrics/summary')
-@limiter.limit("30 per minute")
-def admin_metrics_summary():
-    """Get summary of all metrics (admin only)."""
-    # Check authorization
-    auth_error = require_admin()
-    if auth_error:
-        return auth_error
+            try {
+                const response = await fetch('/process', {
+                    method: 'POST',
+                    body: formData
+                });
 
-    summary = metrics.get_summary()
-    if summary is None:
-        return jsonify({'error': 'Metrics database unavailable'}), 503
+                const data = await response.json();
 
-    return jsonify(summary)
+                if (!response.ok) {
+                    // Include details if available
+                    const errorMsg = data.error || 'Unknown error';
+                    const details = data.details ? `\n\n${data.details}` : '';
+                    throw new Error(errorMsg + details);
+                }
 
-@app.route('/admin/metrics/events')
-@limiter.limit("30 per minute")
-def admin_metrics_events():
-    """Get recent events, optionally filtered (admin only)."""
-    # Check authorization
-    auth_error = require_admin()
-    if auth_error:
-        return auth_error
+                appState.gcodeContent = data.gcode;
+                appState.outputFilename = data.real_filename || data.filename;
 
-    event_type = request.args.get('event_type')
-    limit = min(int(request.args.get('limit', 100)), 1000)  # Cap at 1000
-    offset = int(request.args.get('offset', 0))
+                // Show results
+                showResults(data);
 
-    events = metrics.get_events(event_type=event_type, limit=limit, offset=offset)
-    if events is None:
-        return jsonify({'error': 'Metrics database unavailable'}), 503
+                // Switch to preview mode and visualize G-code
+                switchMode('preview');
+                visualizeGcode(data.gcode);
 
-    return jsonify({
-        'events': events,
-        'count': len(events),
-        'limit': limit,
-        'offset': offset
-    })
-    
-@app.route('/uploads/<token>')
-@limiter.limit("30 per minute")
-def serve_upload(token):
-    """
-    Serve uploaded DXF files for frontend preview using secure token.
-    Token prevents filename guessing attacks.
-    """
-    try:
-        # Look up file by token
-        file_info = file_token_manager.get_file(token)
-        if not file_info:
-            return jsonify({'error': 'File not found or expired'}), 404
+                // Enable download button
+                downloadBtn.disabled = false;
 
-        file_path = file_info['filepath']
-        real_filename = file_info['filename']
+                // Re-check Drive status (config may have been loaded during Onshape import)
+                checkDriveStatus().then(() => {
+                    if (driveAvailable) {
+                        driveBtn.disabled = false;
+                    }
+                });
 
-        # Verify file still exists on disk
-        if not os.path.exists(file_path):
-            return jsonify({'error': 'File not found on disk'}), 404
+            } catch (error) {
+                if (Object.hasOwn(error, "details")) {
+                    console.error(error.details);
+                }
+                showError('Generation Failed', error.message);
+            } finally {
+                hideLoading();
+            }
+        });
 
-        log(f"🎨 Serving upload for preview: token {token[:16]}... → {real_filename}")
+        // Download G-code — use in-memory content to avoid Vercel cross-instance 404
+        downloadBtn.addEventListener('click', () => {
+            if (!appState.gcodeContent || !appState.outputFilename) return;
+            const blob = new Blob([appState.gcodeContent], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = appState.outputFilename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
 
-        # as_attachment=False lets the frontend canvas layer read it directly
-        return send_file(
-            file_path,
-            as_attachment=False,
-            download_name=real_filename,
-            mimetype='image/vnd.dxf'  # standard DXF mime type
-        )
-    except Exception as e:
-        log(f"❌ Error serving upload preview: {e}")
-        return jsonify({'error': str(e)}), 500
+        // Upload to Google Drive
+        driveBtn.addEventListener('click', async () => {
+            if (!appState.outputFilename) return;
 
+            driveBtn.disabled = true;
+            driveBtn.textContent = '⏳ Checking auth...';
+            driveStatus.style.display = 'none';
 
-@app.route('/admin/metrics')
-def admin_metrics_dashboard():
-    """Simple admin view to check out what the team is generating"""
-    # Quick email check using your dummy/real auth module
-    user_email = session.get('user_email')
-    admin_email = os.environ.get('ADMIN_EMAIL', 'mentor@team4909.org')
-    
-    if not user_email or user_email != admin_email:
-        return "Unauthorized", 403
+            try {
+                // First, check if we're authenticated
+                const statusResponse = await fetch('/drive/status');
+                const statusData = await statusResponse.json();
+
+                if (!statusData.authenticated) {
+                    // Not authenticated - open OAuth in popup
+                    driveBtn.textContent = '🔐 Authenticating...';
+                    driveStatus.textContent = 'Opening Google sign-in...';
+                    driveStatus.style.color = '#FDB515';
+                    driveStatus.style.display = 'block';
+
+                    // Open OAuth in popup window
+                    const popup = window.open(
+                        '/auth/login',
+                        'GoogleAuth',
+                        'width=600,height=700,left=100,top=100'
+                    );
+
+                    if (!popup || popup.closed) {
+                        // Popup blocked - show instructions instead of auto-redirecting
+                        driveBtn.textContent = '💾 Save to Google Drive';
+                        driveBtn.disabled = false;
+                        driveStatus.innerHTML = '⚠️ Popup blocked! Please allow popups for this site and try again.<br>' +
+                                               'Or <a href="/auth/login" target="_blank" style="color: #FDB515; text-decoration: underline;">click here</a> to authenticate in a new tab.';
+                        driveStatus.style.color = 'var(--warning)';
+                        driveStatus.style.display = 'block';
+                        return;
+                    }
+
+                    // Wait for popup to close (OAuth complete)
+                    const pollTimer = setInterval(() => {
+                        if (popup.closed) {
+                            clearInterval(pollTimer);
+                            // Popup closed, retry the upload
+                            console.log('Auth popup closed, retrying upload...');
+                            setTimeout(() => {
+                                driveBtn.click(); // Retry the upload
+                            }, 500);
+                        }
+                    }, 500);
+
+                    return;
+                }
+
+                // We're authenticated, proceed with upload
+                driveBtn.textContent = '⏳ Uploading...';
+
+                const response = await fetch(`/drive/upload/${appState.outputFilename}`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    driveStatus.textContent = data.message;
+                    driveStatus.style.color = '#00D26A';
+                    driveStatus.style.display = 'block';
+                    driveBtn.textContent = '✅ Saved!';
+                    setTimeout(() => {
+                        driveBtn.textContent = '💾 Save to Google Drive';
+                        driveBtn.disabled = false;
+                    }, 3000);
+                } else {
+                    driveStatus.textContent = '❌ ' + data.message;
+                    driveStatus.style.color = 'var(--error)';
+                    driveStatus.style.display = 'block';
+                    driveBtn.textContent = '💾 Save to Google Drive';
+                    driveBtn.disabled = false;
+                }
+            } catch (error) {
+                driveStatus.textContent = '❌ Upload failed: ' + error.message;
+                driveStatus.style.color = 'var(--error)';
+                driveStatus.style.display = 'block';
+                driveBtn.textContent = '💾 Save to Google Drive';
+                driveBtn.disabled = false;
+            }
+        });
+
+        // UI helpers
+        function showLoading() {
+            loading.classList.add('show');
+            generateBtn.disabled = true;
+        }
+
+        function hideLoading() {
+            loading.classList.remove('show');
+            generateBtn.disabled = false;
+        }
+
+        function showError(title, message) {
+            errorAlert.classList.add('show');
+            // Escape HTML but preserve newlines
+            const escapedMessage = message
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\n/g, '<br>');
+            errorMessage.innerHTML = `<strong>${title}:</strong><br>${escapedMessage}`;
+
+            // Show debug DXF link if this is an Onshape import
+            const debugDxfLinkError = document.getElementById('debugDxfLinkError');
+            if (debugDxfLinkError && window.ONSHAPE_DATA && window.ONSHAPE_DATA.fromOnshape) {
+                debugDxfLinkError.style.display = 'block';
+            }
+        }
+
+        function hideError() {
+            errorAlert.classList.remove('show');
+            const debugDxfLinkError = document.getElementById('debugDxfLinkError');
+            if (debugDxfLinkError) {
+                debugDxfLinkError.style.display = 'none';
+            }
+        }
+
+        function showResults(data) {
+            results.classList.add('show');
+            consoleOutput.textContent = data.console;
+
+            // Parse statistics from console
+            const lines = data.console.split('\n');
+            const statsHtml = [];
+
+            // Add cycle time if available
+            if (data.cycle_time) {
+                statsHtml.push(`<div class="stat"><div class="stat-label">⏱️ Estimated Time</div><div class="stat-value">${data.cycle_time}</div></div>`);
+            }
+
+            // Extract key info
+            const holesMatch = data.console.match(/(\d+) millable holes/);
+            const pocketsMatch = data.console.match(/and (\d+) pockets/);
+            const linesMatch = data.console.match(/Total lines: (\d+)/);
+
+            if (holesMatch) {
+                statsHtml.push(`<div class="stat"><div class="stat-label">Holes</div><div class="stat-value">${holesMatch[1]}</div></div>`);
+            }
+            if (pocketsMatch) {
+                statsHtml.push(`<div class="stat"><div class="stat-label">Pockets</div><div class="stat-value">${pocketsMatch[1]}</div></div>`);
+            }
+            if (linesMatch) {
+                statsHtml.push(`<div class="stat"><div class="stat-label">G-code Lines</div><div class="stat-value">${linesMatch[1]}</div></div>`);
+            }
+
+            stats.innerHTML = statsHtml.join('');
+
+            // Show debug DXF link if this is an Onshape import
+            const debugDxfLinkSuccess = document.getElementById('debugDxfLinkSuccess');
+            if (debugDxfLinkSuccess && window.ONSHAPE_DATA && window.ONSHAPE_DATA.fromOnshape) {
+                debugDxfLinkSuccess.style.display = 'block';
+            }
+        }
+
+        function hideResults() {
+            results.classList.remove('show');
+            const debugDxfLinkSuccess = document.getElementById('debugDxfLinkSuccess');
+            if (debugDxfLinkSuccess) {
+                debugDxfLinkSuccess.style.display = 'none';
+            }
+        }
+
+        // DXF Setup State
+        let currentMode = 'setup'; // 'setup' or 'preview'
+        let dxfGeometry = null; // Parsed DXF geometry
+        let rotationAngle = 0; // 0, 90, 180, 270 degrees
+        let dxfCanvas2D = null;
+        let dxfCtx2D = null;
+        let dxfBounds = null;
+
+        // Mode Switching
+        function switchMode(mode) {
+            currentMode = mode;
+
+            // Update mode buttons
+            document.querySelectorAll('.mode-button').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.mode === mode);
+            });
+
+            // Show/hide appropriate views
+            const setupContainer = document.getElementById('dxf-setup-container');
+            const previewContainer = document.getElementById('canvas-container');
+            const scrubberContainer = document.getElementById('scrubberContainer');
+            const previewControls = document.getElementById('previewControls');
+            const gcodeButtons = document.getElementById('gcodeButtons');
+            const stockSizeDisplay = document.getElementById('stockSizeDisplay');
+
+            if (mode === 'setup') {
+                setupContainer.style.display = 'block';
+                previewContainer.style.display = 'none';
+                scrubberContainer.style.display = 'none';
+                previewControls.style.display = 'none';
+                gcodeButtons.style.display = 'none';
+                if (stockSizeDisplay) stockSizeDisplay.style.display = 'none';
+                
+                // Resize canvas now that it's visible
+                if (dxfCanvas2D && dxfGeometry) {
+                    setTimeout(() => {
+                        const rect = dxfCanvas2D.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            dxfCanvas2D.width = rect.width;
+                            dxfCanvas2D.height = rect.height;
+                        }
+                        renderDxfSetup();
+                    }, 0);
+                } else if (dxfGeometry) {
+                    renderDxfSetup();
+                }
+            } else {
+                setupContainer.style.display = 'none';
+                previewContainer.style.display = 'block';
+                previewControls.style.display = 'flex';
+                gcodeButtons.style.display = 'flex';
+                // Stock size display shown if G-code has been generated
+                if (stockSizeDisplay && toolpathMoves.length > 0) {
+                    stockSizeDisplay.style.display = 'flex';
+                }
+                // Scrubber visibility handled by visualizeGcode
+            }
+        }
+
+        // Initialize 2D canvas for DXF setup
+        function initDxfSetup() {
+            dxfCanvas2D = document.getElementById('dxfSetupCanvas');
+            dxfCtx2D = dxfCanvas2D.getContext('2d');
+            
+            // CRITICAL: Set canvas internal size to match CSS display size
+            // to avoid stretching/distortion
+            const rect = dxfCanvas2D.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                dxfCanvas2D.width = rect.width;
+                dxfCanvas2D.height = rect.height;
+            } else {
+                // Fallback if element not yet sized
+                console.warn('Canvas not yet sized, using defaults');
+                dxfCanvas2D.width = 800;
+                dxfCanvas2D.height = 500;
+            }
+            
+            // Setup event listeners
+            document.getElementById('rotateBtn').addEventListener('click', () => {
+                rotationAngle = (rotationAngle + 90) % 360;
+                appState.rotationAngle = rotationAngle; // Keep appState in sync
+                document.getElementById('rotationDisplay').textContent = rotationAngle + '°';
+                renderDxfSetup();
+                saveSettings(); // Persist rotation angle
+            });
+            
+            // Mode toggle listeners
+            document.querySelectorAll('.mode-button').forEach(btn => {
+                btn.addEventListener('click', () => switchMode(btn.dataset.mode));
+            });
+        }
+
+        /**
+         * Parse Z depth from layer name (e.g., "Z_-0p250" -> -0.25, "Z_0p000" -> 0)
+         * Returns null if layer name doesn't match the expected format
+         */
+        function parseLayerDepth(layerName) {
+            const match = layerName.match(/^Z_(-?\d+)p(\d+)$/);
+            if (!match) return null;
+
+            const isNegative = match[1].startsWith('-');
+            const intPart = parseInt(match[1]);
+            const fracPart = parseInt(match[2]);
+            const fracValue = fracPart / Math.pow(10, match[2].length);
+
+            // Handle negative values correctly (e.g., Z_-0p250 should be -0.25, not 0.25)
+            if (isNegative) {
+                return intPart - fracValue;
+            } else {
+                return intPart + fracValue;
+            }
+        }
+
+        /**
+         * Check if DXF has multiple depth layers (2.5D mode)
+         * Returns true if there are 2+ layers with different Z depths
+         */
+        function isMultiDepthMode() {
+            if (!dxfGeometry || !dxfGeometry.layers) return false;
+
+            const depthValues = new Set();
+            for (const [layerName, layerInfo] of dxfGeometry.layers) {
+                if (layerInfo.depth !== null) {
+                    depthValues.add(layerInfo.depth);
+                }
+            }
+
+            // Multi-depth mode if we have 2 or more different Z depths
+            return depthValues.size >= 2;
+        }
+
+        /**
+         * Update form visibility based on current mode (2D vs 2.5D, tubing vs plate)
+         */
+        function updateFormVisibility() {
+            const materialSelect = document.getElementById('material');
+            const tubeParams = document.getElementById('tubeParams');
+            const thicknessInput = document.getElementById('thickness');
+            const quantityGroup = document.getElementById('quantityGroup');
+            const isAluminumTube = materialSelect.value === 'aluminum_tube';
+            const isMultiDepth = isMultiDepthMode();
+
+            // Hide/show aluminum_tube option based on 2.5D mode
+            const tubeOption = Array.from(materialSelect.options).find(opt => opt.value === 'aluminum_tube');
+            if (tubeOption) {
+                if (isMultiDepth) {
+                    tubeOption.style.display = 'none';
+                    // If aluminum_tube was selected, switch to default
+                    if (isAluminumTube) {
+                        materialSelect.value = 'plywood';
+                        materialSelect.dispatchEvent(new Event('change'));
+                    }
+                } else {
+                    tubeOption.style.display = '';
+                }
+            }
+
+            // In 2.5D mode: make thickness field readonly (it comes from Onshape)
+            if (thicknessInput) {
+                if (isMultiDepth) {
+                    thicknessInput.setAttribute('readonly', 'readonly');
+                } else {
+                    thicknessInput.removeAttribute('readonly');
+                }
+            }
+
+            // Hide tube parameters unless aluminum_tube is selected
+            if (tubeParams) {
+                tubeParams.style.display = isAluminumTube ? 'block' : 'none';
+            if (quantityGroup) quantityGroup.style.display = isAluminumTube ? 'none' : 'block';
+            const nestRotationGroup = document.getElementById('nestRotationGroup');
+            if (nestRotationGroup) nestRotationGroup.style.display = isAluminumTube ? 'none' : 'block';
+            }
+        }
+
+        /**
+         * Organize DXF entities by layer and assign colors
+         * Returns: { layers: Map<layerName, {depth, color, entities}>, layerOrder: [layerName] }
+         */
+        function organizeDxfLayers(entities) {
+            const layersMap = new Map();
+
+            // Color palette for up to 10 layers (visible on black background)
+            const layerColors = [
+                0xFFFFFF, // White (base/top layer)
+                0xFFFF00, // Yellow
+                0x00FFFF, // Cyan
+                0xFF00FF, // Magenta
+                0x00FF00, // Lime Green
+                0xFF8800, // Orange
+                0xFF66FF, // Pink
+                0x66CCFF, // Light Blue
+                0x66FF66, // Light Green
+                0xFF6666  // Light Coral
+            ];
+
+            // Group entities by layer
+            entities.forEach(entity => {
+                const layerName = entity.layer || '0';
+                if (!layersMap.has(layerName)) {
+                    layersMap.set(layerName, {
+                        name: layerName,
+                        depth: parseLayerDepth(layerName),
+                        entities: []
+                    });
+                }
+                layersMap.get(layerName).entities.push(entity);
+            });
+
+            // Sort layers by depth (shallowest first)
+            const sortedLayers = Array.from(layersMap.values()).sort((a, b) => {
+                // Layers without depth info go first (assume they're the base)
+                if (a.depth === null && b.depth === null) return 0;
+                if (a.depth === null) return -1;
+                if (b.depth === null) return 1;
+                return b.depth - a.depth; // Higher Z (less negative) first
+            });
+
+            // Assign colors
+            sortedLayers.forEach((layer, index) => {
+                layer.color = layerColors[Math.min(index, layerColors.length - 1)];
+            });
+
+            // Log layer information
+            console.log('DXF Layers:');
+            sortedLayers.forEach(layer => {
+                const depthStr = layer.depth !== null ? `${layer.depth.toFixed(3)}"` : 'N/A';
+                console.log(`  ${layer.name}: depth=${depthStr}, color=${layer.color.toString(16)}, entities=${layer.entities.length}`);
+            });
+
+            return {
+                layers: layersMap,
+                layerOrder: sortedLayers.map(l => l.name)
+            };
+        }
+
+        // Parse DXF geometry from file using dxf-parser library
+        function parseDxfForSetup(dxfContent) {
+            parseDxfManually(dxfContent);
+        }
+
+        async function buildNestedPreviewFromFiles(files) {
+            const dxfFiles = files.filter(file => file.name.toLowerCase().endsWith('.dxf'));
+            if (dxfFiles.length === 0) return;
+
+            const parts = [];
+            for (const file of dxfFiles) {
+                const content = await file.text();
+                parseDxfManually(content);
+                parts.push({
+                    name: `Part ${parts.length + 1}`,
+                    filename: file.name,
+                    geometry: JSON.parse(JSON.stringify(dxfGeometry)),
+                    bounds: { ...dxfBounds },
+                    width: dxfBounds.width,
+                    height: dxfBounds.height,
+                    area: dxfBounds.width * dxfBounds.height
+                });
+            }
+
+            const stockWidth = window.MACHINE_CONFIG?.xMax || 48.0;
+            const stockHeight = window.MACHINE_CONFIG?.yMax || 96.0;
+            const gap = Math.max(0.05, (document.getElementById('toolDiameter') ? parseFloat(document.getElementById('toolDiameter').value || '0.125') : 0.125));
+            const nestRotation = document.getElementById('nestRotation')?.value || 'auto';
+
+            try {
+                const placements = packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation);
+                const preview = buildCompositePreviewGeometry(parts, placements);
+
+                dxfGeometry = {
+                    entities: preview.entities,
+                    layers: null,
+                    layerOrder: null,
+                    parts: preview.transformedParts
+                };
+                dxfBounds = {
+                    ...preview.bounds,
+                    width: preview.bounds.maxX - preview.bounds.minX,
+                    height: preview.bounds.maxY - preview.bounds.minY,
+                    centerX: (preview.bounds.minX + preview.bounds.maxX) / 2,
+                    centerY: (preview.bounds.minY + preview.bounds.maxY) / 2
+                };
+                appState.nestedParts = preview.transformedParts;
+                updateFormVisibility();
+                document.getElementById('modeToggle').style.display = 'flex';
+                switchMode('setup');
+            } catch (error) {
+                console.warn('Composite preview failed, falling back to first DXF preview:', error);
+                appState.nestedParts = null;
+                parseDxfForSetup(await dxfFiles[0].text());
+            }
+        }
+
+        // Extract HATCH boundary paths as LWPOLYLINE entities
+        // HATCH entities have a nested structure (paths with variable vertex counts)
+        // that is too complex for the line-by-line parser, so we handle them separately.
+        function extractHatchEntities(dxfContent) {
+            const lines = dxfContent.split('\n');
+            const entities = [];
+            let i = 0;
+
+            while (i < lines.length) {
+                const line = lines[i].trim();
+
+                // Look for HATCH entity start (group code 0, value HATCH)
+                if (line === '0' && i + 1 < lines.length && lines[i + 1].trim() === 'HATCH') {
+                    i += 2;  // Skip past "0" and "HATCH"
+                    let layer = '0';
+                    let numPaths = 0;
+
+                    // Parse HATCH header to get layer and path count
+                    while (i < lines.length) {
+                        const code = lines[i].trim();
+                        if (code === '0') break;  // Next entity
+
+                        if (code === '8' && i + 1 < lines.length) {
+                            layer = lines[i + 1].trim();
+                        } else if (code === '91' && i + 1 < lines.length) {
+                            numPaths = parseInt(lines[i + 1].trim()) || 0;
+                            i += 2;
+                            break;  // Start reading paths
+                        }
+                        i += 2;  // DXF is always code/value pairs
+                    }
+
+                    // Parse each boundary path
+                    for (let p = 0; p < numPaths; p++) {
+                        let pathFlags = 0;
+                        let numVertices = 0;
+                        const vertices = [];
+
+                        // Read path header codes until we hit group code 93 (vertex count)
+                        while (i < lines.length) {
+                            const code = lines[i].trim();
+                            if (code === '0') break;  // Next entity (shouldn't happen mid-path)
+
+                            if (code === '92' && i + 1 < lines.length) {
+                                pathFlags = parseInt(lines[i + 1].trim()) || 0;
+                            } else if (code === '93' && i + 1 < lines.length) {
+                                numVertices = parseInt(lines[i + 1].trim()) || 0;
+                                i += 2;
+                                break;  // Start reading vertices
+                            }
+                            i += 2;
+                        }
+
+                        // Read vertices (pairs of group code 10/20)
+                        let tempX = null;
+                        let verticesRead = 0;
+                        while (i < lines.length && verticesRead < numVertices) {
+                            const code = lines[i].trim();
+                            if (code === '0') break;
+
+                            if (code === '10' && i + 1 < lines.length) {
+                                tempX = parseFloat(lines[i + 1].trim());
+                            } else if (code === '20' && i + 1 < lines.length && tempX !== null) {
+                                const y = parseFloat(lines[i + 1].trim());
+                                vertices.push({ x: tempX, y: y });
+                                tempX = null;
+                                verticesRead++;
+                            }
+                            i += 2;
+                        }
+
+                        // Create LWPOLYLINE entity from this boundary path
+                        if (vertices.length >= 3) {
+                            entities.push({
+                                type: 'LWPOLYLINE',
+                                vertices: vertices,
+                                closed: true,
+                                shape: true,
+                                layer: layer,
+                                isHatchBoundary: true,
+                                isExternalBoundary: (pathFlags & 1) !== 0
+                            });
+                        }
+                    }
+                } else {
+                    i++;
+                }
+            }
+
+            if (entities.length > 0) {
+                console.log(`Extracted ${entities.length} boundary path(s) from HATCH entities`);
+            }
+            return entities;
+        }
+
+        // DXF parser - handles all entity types including HATCH
+        function parseDxfManually(dxfContent) {
+            const lines = dxfContent.split('\n');
+
+            const entities = [];
+            let inEntitiesSection = false;
+            let currentEntity = null;
+            let entityData = {};
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+
+                if (line === 'ENTITIES') {
+                    inEntitiesSection = true;
+                    continue;
+                }
+                if (line === 'ENDSEC' && inEntitiesSection) break;
+                if (!inEntitiesSection) continue;
+
+                // Detect entity type
+                if (line === 'CIRCLE' || line === 'ARC' || line === 'LINE' || line === 'LWPOLYLINE' || line === 'SPLINE') {
+                    if (currentEntity) {
+                        entities.push(createEntity(currentEntity, entityData));
+                    }
+                    currentEntity = line;
+                    entityData = { type: line };
+                    if (line === 'LWPOLYLINE') {
+                        entityData.vertices = [];
+                    }
+                    if (line === 'SPLINE') {
+                        entityData.controlPoints = [];
+                    }
+                }
+
+                // Parse layer name (group code 8)
+                if (line === '8' && i + 1 < lines.length) {
+                    const layerName = lines[i + 1].trim();
+                    entityData.layer = layerName;
+                }
+
+                // Parse coordinates (store in entity data, don't update bounds yet)
+                if (line === '10' && i + 1 < lines.length) {
+                    const val = parseFloat(lines[i + 1]);
+                    if (!isNaN(val) && Math.abs(val) < 1e10) {
+                        if (currentEntity === 'CIRCLE' || currentEntity === 'ARC') {
+                            entityData.centerX = val;
+                        } else if (currentEntity === 'LINE') {
+                            entityData.x1 = val;
+                        } else if (currentEntity === 'LWPOLYLINE') {
+                            entityData.tempX = val;
+                        } else if (currentEntity === 'SPLINE') {
+                            entityData.tempX = val;
+                        }
+                    }
+                } else if (line === '20' && i + 1 < lines.length) {
+                    const val = parseFloat(lines[i + 1]);
+                    if (!isNaN(val) && Math.abs(val) < 1e10) {
+                        if (currentEntity === 'CIRCLE' || currentEntity === 'ARC') {
+                            entityData.centerY = val;
+                        } else if (currentEntity === 'LINE') {
+                            entityData.y1 = val;
+                        } else if (currentEntity === 'LWPOLYLINE' && entityData.tempX !== undefined) {
+                            entityData.vertices.push({ x: entityData.tempX, y: val });
+                            delete entityData.tempX;
+                        } else if (currentEntity === 'SPLINE' && entityData.tempX !== undefined) {
+                            entityData.controlPoints.push({ x: entityData.tempX, y: val });
+                            delete entityData.tempX;
+                        }
+                    }
+                } else if (line === '40' && i + 1 < lines.length) {
+                    const val = parseFloat(lines[i + 1]);
+                    if (!isNaN(val) && val < 1e10) {
+                        entityData.radius = val;
+                    }
+                } else if (line.trim() === '50' && i + 1 < lines.length && currentEntity === 'ARC') {
+                    entityData.startAngle = parseFloat(lines[i + 1].trim());
+                } else if (line.trim() === '51' && i + 1 < lines.length && currentEntity === 'ARC') {
+                    entityData.endAngle = parseFloat(lines[i + 1].trim());
+                } else if (line === '11' && i + 1 < lines.length) {
+                    const val = parseFloat(lines[i + 1]);
+                    if (!isNaN(val) && Math.abs(val) < 1e10) {
+                        entityData.x2 = val;
+                    }
+                } else if (line === '21' && i + 1 < lines.length) {
+                    const val = parseFloat(lines[i + 1]);
+                    if (!isNaN(val) && Math.abs(val) < 1e10) {
+                        entityData.y2 = val;
+                    }
+                } else if (line === '70' && i + 1 < lines.length && currentEntity === 'LWPOLYLINE') {
+                    // Group code 70 contains polyline flags; bit 0 (value & 1) indicates closed
+                    const flags = parseInt(lines[i + 1].trim());
+                    if (!isNaN(flags)) {
+                        entityData.closed = (flags & 1) !== 0;
+                    }
+                }
+            }
+
+            if (currentEntity) {
+                entities.push(createEntity(currentEntity, entityData));
+            }
+
+            // Extract HATCH boundary paths (converted to LWPOLYLINE entities)
+            const hatchEntities = extractHatchEntities(dxfContent);
+            entities.push(...hatchEntities);
+
+            // Calculate bounds from rendered entities only (not raw DXF coordinates)
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+
+            function updateBounds(x, y) {
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+
+            // Calculate bounds only from closed contours + circles (match backend behavior)
+            // But still render all entities for preview
+            console.log(`Calculating bounds from entities (filtering construction geometry)...`);
+            entities.forEach((entity, idx) => {
+                // Skip bounds calculation for isolated LINE/ARC entities
+                // These are construction lines that won't be processed by backend
+                let skipForBounds = false;
+
+                if (entity.type === 'LINE' || entity.type === 'ARC') {
+                    // Check if this is an isolated construction entity (very large)
+                    let isConstruction = false;
+
+                    if (entity.type === 'LINE' && entity.vertices.length === 2) {
+                        const dx = entity.vertices[1].x - entity.vertices[0].x;
+                        const dy = entity.vertices[1].y - entity.vertices[0].y;
+                        const length = Math.sqrt(dx * dx + dy * dy);
+                        if (length > 12.0) {  // Suspiciously long isolated line
+                            isConstruction = true;
+                            console.log(`  Skipping LINE ${idx} for bounds (${length.toFixed(1)}" long, likely construction)`);
+                        }
+                    } else if (entity.type === 'ARC' && entity.radius > 3.0) {
+                        isConstruction = true;
+                        console.log(`  Skipping ARC ${idx} for bounds (${entity.radius.toFixed(1)}" radius, likely construction)`);
+                    }
+
+                    skipForBounds = isConstruction;
+                }
+
+                if (skipForBounds) {
+                    return;  // Skip this entity for bounds calculation
+                }
+                let entityMinX = Infinity, entityMaxX = -Infinity;
+                let entityMinY = Infinity, entityMaxY = -Infinity;
+
+                if (entity.type === 'CIRCLE') {
+                    entityMinX = entity.center.x - entity.radius;
+                    entityMaxX = entity.center.x + entity.radius;
+                    entityMinY = entity.center.y - entity.radius;
+                    entityMaxY = entity.center.y + entity.radius;
+                    updateBounds(entityMinX, entityMinY);
+                    updateBounds(entityMaxX, entityMaxY);
+                } else if (entity.type === 'ARC') {
+                    // Calculate proper arc bounds (not full circle)
+                    const bounds = calculateArcBounds(
+                        entity.center.x,
+                        entity.center.y,
+                        entity.radius,
+                        entity.startAngle || 0,
+                        entity.endAngle || 360
+                    );
+                    updateBounds(bounds.minX, bounds.minY);
+                    updateBounds(bounds.maxX, bounds.maxY);
+                } else if (entity.type === 'LINE') {
+                    entity.vertices.forEach(v => {
+                        entityMinX = Math.min(entityMinX, v.x);
+                        entityMaxX = Math.max(entityMaxX, v.x);
+                        entityMinY = Math.min(entityMinY, v.y);
+                        entityMaxY = Math.max(entityMaxY, v.y);
+                        updateBounds(v.x, v.y);
+                    });
+                } else if (entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE') {
+                    entity.vertices.forEach(v => {
+                        entityMinX = Math.min(entityMinX, v.x);
+                        entityMaxX = Math.max(entityMaxX, v.x);
+                        entityMinY = Math.min(entityMinY, v.y);
+                        entityMaxY = Math.max(entityMaxY, v.y);
+                        updateBounds(v.x, v.y);
+                    });
+                } else if (entity.type === 'SPLINE' && entity.controlPoints) {
+                    entity.controlPoints.forEach(p => {
+                        entityMinX = Math.min(entityMinX, p.x);
+                        entityMaxX = Math.max(entityMaxX, p.x);
+                        entityMinY = Math.min(entityMinY, p.y);
+                        entityMaxY = Math.max(entityMaxY, p.y);
+                        updateBounds(p.x, p.y);
+                    });
+                }
+
+                // Log entities that extend beyond expected bounds
+                if (entityMinX < -27 || entityMaxX > -9 || entityMinY < -1 || entityMaxY > 8) {
+                    console.log(`  ⚠️ Entity ${idx} (${entity.type}) extends bounds significantly:`);
+                    console.log(`     X=[${entityMinX.toFixed(3)}, ${entityMaxX.toFixed(3)}], Y=[${entityMinY.toFixed(3)}, ${entityMaxY.toFixed(3)}]`);
+                    if (entity.type === 'CIRCLE' || entity.type === 'ARC') {
+                        console.log(`     Center: (${entity.center.x.toFixed(3)}, ${entity.center.y.toFixed(3)}), Radius: ${entity.radius.toFixed(3)}`);
+                    }
+                }
+            });
+            console.log(`After bounds calculation: X=[${minX.toFixed(3)}, ${maxX.toFixed(3)}], Y=[${minY.toFixed(3)}, ${maxY.toFixed(3)}]`);
+
+            if (minX === Infinity) {
+                console.warn('⚠️ No valid geometry found, using fallback 10×10 bounds');
+                minX = 0; maxX = 10;
+                minY = 0; maxY = 10;
+            }
+
+            console.log(`Manual parse: ${entities.length} entities`);
+            console.log(`Bounds: X=[${minX.toFixed(3)}, ${maxX.toFixed(3)}], Y=[${minY.toFixed(3)}, ${maxY.toFixed(3)}]`);
+
+            // Organize entities by layer and parse Z depths (reuse existing function)
+            const layerData = organizeDxfLayers(entities);
+
+            dxfGeometry = {
+                minX, maxX, minY, maxY,
+                entities: entities,
+                layers: layerData.layers,
+                layerOrder: layerData.layerOrder
+            };
+            dxfBounds = {
+                width: maxX - minX,
+                height: maxY - minY,
+                centerX: (minX + maxX) / 2,
+                centerY: (minY + maxY) / 2
+            };
+
+            // Update form visibility based on detected layers (2D vs 2.5D)
+            updateFormVisibility();
+
+            document.getElementById('modeToggle').style.display = 'flex';
+            switchMode('setup');
+        }
         
-    event_type = request.args.get('event_type')
-    limit = min(int(request.args.get('limit', 100)), 1000)
-    offset = int(request.args.get('offset', 0))
+        function createEntity(type, data) {
+            if (type === 'CIRCLE') {
+                return {
+                    type: 'CIRCLE',
+                    center: { x: data.centerX, y: data.centerY },
+                    radius: data.radius,
+                    layer: data.layer || '0'
+                };
+            } else if (type === 'ARC') {
+                return {
+                    type: 'ARC',
+                    center: { x: data.centerX, y: data.centerY },
+                    radius: data.radius,
+                    startAngle: data.startAngle || 0,
+                    endAngle: data.endAngle || 360,
+                    layer: data.layer || '0'
+                };
+            } else if (type === 'LINE') {
+                return {
+                    type: 'LINE',
+                    vertices: [
+                        { x: data.x1, y: data.y1 },
+                        { x: data.x2, y: data.y2 }
+                    ],
+                    layer: data.layer || '0'
+                };
+            } else if (type === 'LWPOLYLINE') {
+                return {
+                    type: 'LWPOLYLINE',
+                    vertices: data.vertices || [],
+                    closed: data.closed || false,  // Used to filter construction geometry
+                    shape: data.closed || false,  // Used by renderer to close path
+                    layer: data.layer || '0'
+                };
+            } else if (type === 'SPLINE') {
+                return {
+                    type: 'SPLINE',
+                    controlPoints: data.controlPoints || [],
+                    layer: data.layer || '0'
+                };
+            }
+            return null;
+        }
 
-    events = metrics.get_events(event_type=event_type, limit=limit, offset=offset)
-    if events is None:
-        return jsonify({'error': 'Metrics database unavailable'}), 503
+        // Render 2D DXF setup view
+        function renderDxfSetup() {
+            if (!dxfGeometry || !dxfCtx2D) return;
+            
+            const ctx = dxfCtx2D;
+            const canvas = dxfCanvas2D;
+            const width = canvas.width;
+            const height = canvas.height;
+            
+            // Check if canvas has valid size
+            if (width === 0 || height === 0) {
+                console.warn('Canvas has zero size, skipping render');
+                return;
+            }
+            
+            // Clear
+            ctx.fillStyle = '#0A0E14';
+            ctx.fillRect(0, 0, width, height);
+            
+            // Calculate transform to fit DXF in canvas with padding
+            const padding = 80;
+            const availWidth = width - 2 * padding;
+            const availHeight = height - 2 * padding;
+            
+            // Apply rotation to bounds for calculating display size
+            let displayWidth = dxfBounds.width;
+            let displayHeight = dxfBounds.height;
+            if (rotationAngle === 90 || rotationAngle === 270) {
+                [displayWidth, displayHeight] = [displayHeight, displayWidth];
+            }
+            
+            const scale = Math.min(availWidth / displayWidth, availHeight / displayHeight);
+            
+            // Center position (no rotation of entire canvas)
+            const centerX = width / 2;
+            const centerY = height / 2;
+            
+            // Helper functions to transform coordinates
+            function rotatePoint(x, y, angle) {
+                const rad = -angle * Math.PI / 180; // Negative for clockwise
+                const cos = Math.cos(rad);
+                const sin = Math.sin(rad);
+                return {
+                    x: x * cos - y * sin,
+                    y: x * sin + y * cos
+                };
+            }
+            
+            function toCanvasCoords(x, y) {
+                // Translate to center origin
+                let dx = x - dxfBounds.centerX;
+                let dy = y - dxfBounds.centerY;
+                
+                // Apply rotation
+                const rotated = rotatePoint(dx, dy, rotationAngle);
+                
+                // Scale and flip Y, then translate to canvas center
+                return {
+                    x: centerX + rotated.x * scale,
+                    y: centerY - rotated.y * scale
+                };
+            }
+            
+            // Draw all entities (rotated) with layer-specific colors
+            ctx.lineWidth = 1.5;
 
-    return jsonify({
-        'events': events,
-        'count': len(events),
-        'limit': limit,
-        'offset': offset
-    })
-def cleanup():
-    """Clean up temporary files on shutdown"""
-    # Skip cleanup for serverless - containers are ephemeral
-    if os.environ.get('VERCEL') == '1':
-        return
+            // Check if we have layer information (multi-layer DXF)
+            const hasLayers = dxfGeometry.layers && dxfGeometry.layerOrder;
 
-    try:
-        shutil.rmtree(TEMP_DIR)
-        log(f"🗑️  Cleaned up temp directory: {TEMP_DIR}")
-    except Exception as e:
-        log(f"⚠️  Failed to clean up temp directory: {e}")
+            // Group entities by layer if we have layer info
+            let layerGroups;
+            if (hasLayers) {
+                layerGroups = new Map();
+                dxfGeometry.entities.forEach(entity => {
+                    const layerName = entity.layer || '0';
+                    if (!layerGroups.has(layerName)) {
+                        layerGroups.set(layerName, []);
+                    }
+                    layerGroups.get(layerName).push(entity);
+                });
+            } else {
+                // Single layer - use gray
+                layerGroups = new Map([['default', dxfGeometry.entities || []]]);
+            }
 
-# Register cleanup only if not serverless (serverless containers auto-cleanup)
-if os.environ.get('VERCEL') != '1':
-    atexit.register(cleanup)
+            // Draw each layer group with its assigned color
+            if (dxfGeometry.entities) {
+                layerGroups.forEach((layerEntities, layerName) => {
+                    // Get color for this layer
+                    let layerColor = '#6B7280'; // Default gray for single-layer or unknown layers
+                    if (hasLayers && dxfGeometry.layers.has(layerName)) {
+                        const colorHex = dxfGeometry.layers.get(layerName).color;
+                        layerColor = '#' + colorHex.toString(16).padStart(6, '0');
+                    }
 
-if __name__ == '__main__':
-    # Get port from environment variable (Railway) or default to 6238 for local dev
-    port = int(os.environ.get('PORT', 4909))
-    
-    log("="*70)
-    log("BionicsCam - FRC Team 4909")
-    log("="*70)
-    log(f"\nPost-processor script: {POST_PROCESSOR}")
-    log(f"Temporary directory: {TEMP_DIR}")
-    log("\n🚀 Starting server...")
-    log(f"📂 Server will run on port: {port}")
-    log("\n⚠️  Press Ctrl+C to stop the server\n")
-    log("="*70)
-    
-    # Disable debug mode in production
-    debug_mode = os.environ.get('FLASK_ENV') != 'production'
-    app.run(debug=debug_mode, host='0.0.0.0', port=port)
+                    ctx.strokeStyle = layerColor;
+
+                    layerEntities.forEach(entity => {
+                        ctx.beginPath();
+                    
+                    switch(entity.type) {
+                        case 'CIRCLE':
+                            const cPos = toCanvasCoords(entity.center.x, entity.center.y);
+                            ctx.arc(cPos.x, cPos.y, entity.radius * scale, 0, Math.PI * 2);
+                            ctx.stroke();
+                            break;
+                            
+                        case 'ARC':
+                            const aPos = toCanvasCoords(entity.center.x, entity.center.y);
+                            // Y-flip means angles are negated, rotation subtracts from angle
+                            // Canvas angle = -(DXF angle - rotation) = -DXF angle + rotation
+                            const startRad = (-entity.startAngle + rotationAngle) * Math.PI / 180;
+                            const endRad = (-entity.endAngle + rotationAngle) * Math.PI / 180;
+                            const arcRadius = entity.radius * scale;
+                            
+                            // Validate arc parameters
+                            if (isNaN(startRad) || isNaN(endRad) || arcRadius <= 0 || !isFinite(arcRadius)) {
+                                console.warn('Invalid arc parameters:', { startRad, endRad, arcRadius });
+                                break;
+                            }
+                            
+                            // Y-flip also reverses direction: counter-clockwise becomes clockwise
+                            // So we swap start and end to maintain the arc direction
+                            ctx.arc(aPos.x, aPos.y, arcRadius, endRad, startRad, false);
+                            ctx.stroke();
+                            break;
+                            
+                        case 'LINE':
+                            const p1 = toCanvasCoords(entity.vertices[0].x, entity.vertices[0].y);
+                            const p2 = toCanvasCoords(entity.vertices[1].x, entity.vertices[1].y);
+                            ctx.moveTo(p1.x, p1.y);
+                            ctx.lineTo(p2.x, p2.y);
+                            ctx.stroke();
+                            break;
+                            
+                        case 'LWPOLYLINE':
+                        case 'POLYLINE':
+                            if (entity.vertices && entity.vertices.length > 0) {
+                                const v0 = toCanvasCoords(entity.vertices[0].x, entity.vertices[0].y);
+                                ctx.moveTo(v0.x, v0.y);
+                                for (let i = 1; i < entity.vertices.length; i++) {
+                                    const v = toCanvasCoords(entity.vertices[i].x, entity.vertices[i].y);
+                                    ctx.lineTo(v.x, v.y);
+                                }
+                                if (entity.shape) {
+                                    ctx.closePath();
+                                }
+                                ctx.stroke();
+                            }
+                            break;
+                            
+                        case 'SPLINE':
+                            if (entity.controlPoints && entity.controlPoints.length > 1) {
+                                const sp0 = toCanvasCoords(entity.controlPoints[0].x, entity.controlPoints[0].y);
+                                ctx.moveTo(sp0.x, sp0.y);
+                                for (let i = 1; i < entity.controlPoints.length; i++) {
+                                    const sp = toCanvasCoords(entity.controlPoints[i].x, entity.controlPoints[i].y);
+                                    ctx.lineTo(sp.x, sp.y);
+                                }
+                                ctx.stroke();
+                            }
+                            break;
+                            
+                        case 'ELLIPSE':
+                            const ePos = toCanvasCoords(entity.center.x, entity.center.y);
+                            const majorRadius = Math.sqrt(entity.majorAxisEndPoint.x ** 2 + entity.majorAxisEndPoint.y ** 2);
+                            const minorRadius = majorRadius * entity.axisRatio;
+                            ctx.ellipse(ePos.x, ePos.y, majorRadius * scale, minorRadius * scale, 0, 0, Math.PI * 2);
+                            ctx.stroke();
+                            break;
+                    }
+                    });
+                });
+            }
+
+            // Calculate bounding box corners in SCREEN coordinates (NOT rotated)
+            const boxLeft = centerX - (displayWidth * scale) / 2;
+            const boxRight = centerX + (displayWidth * scale) / 2;
+            const boxTop = centerY - (displayHeight * scale) / 2;
+            const boxBottom = centerY + (displayHeight * scale) / 2;
+            
+            // Draw bounding box (dashed, NOT rotated)
+            ctx.strokeStyle = '#8B949E';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.strokeRect(boxLeft, boxTop, displayWidth * scale, displayHeight * scale);
+            ctx.setLineDash([]);
+            
+            // Draw origin marker at bottom-left (ALWAYS)
+            const originX = boxLeft;
+            const originY = boxBottom;
+            
+            ctx.beginPath();
+            ctx.arc(originX, originY, 12, 0, Math.PI * 2);
+            ctx.fillStyle = '#FDB515';
+            ctx.fill();
+            ctx.strokeStyle = '#FDB515';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            
+            // Draw origin label
+            ctx.fillStyle = '#FDB515';
+            ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Origin (0,0)', originX, originY - 25);
+            
+            // Draw axes from bottom-left origin
+            // X axis (red) - points right
+            ctx.beginPath();
+            ctx.moveTo(originX, originY);
+            ctx.lineTo(originX + 60, originY);
+            ctx.strokeStyle = '#FF0000';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            ctx.fillStyle = '#FF0000';
+            ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+            ctx.fillText('X', originX + 70, originY);
+            
+            // Y axis (green) - points up
+            ctx.beginPath();
+            ctx.moveTo(originX, originY);
+            ctx.lineTo(originX, originY - 60);
+            ctx.strokeStyle = '#00FF00';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            ctx.fillStyle = '#00FF00';
+            ctx.fillText('Y', originX, originY - 70);
+            
+            // Draw dimensions at top
+            ctx.font = '14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+
+            // Check if part fits within machine bounds
+            const machineXMax = window.MACHINE_CONFIG?.xMax || 48.0;
+            const machineYMax = window.MACHINE_CONFIG?.yMax || 96.0;
+            const fitsInMachine = displayWidth <= machineXMax && displayHeight <= machineYMax;
+
+            if (fitsInMachine) {
+                ctx.fillStyle = '#8B949E';
+                ctx.fillText(
+                    `${displayWidth.toFixed(2)}" × ${displayHeight.toFixed(2)}" (${rotationAngle}°)`,
+                    width / 2,
+                    20
+                );
+            } else {
+                // Part exceeds machine bounds - show error
+                ctx.fillStyle = '#FF4444';
+                ctx.fillText(
+                    `⚠️ ${displayWidth.toFixed(2)}" × ${displayHeight.toFixed(2)}" (${rotationAngle}°) - TOO LARGE`,
+                    width / 2,
+                    20
+                );
+                ctx.fillStyle = '#FF4444';
+                ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+                ctx.fillText(
+                    `Machine max: ${machineXMax.toFixed(0)}" × ${machineYMax.toFixed(0)}" - Rotate or reduce size`,
+                    width / 2,
+                    40
+                );
+            }
+        }
+
+        // G-code visualization
+        let toolpathMoves = []; // Array of moves for scrubber
+        let toolpathOffsetX = 0; // X offset to align toolpath lower-left with origin
+        let toolpathOffsetY = 0; // Y offset to align toolpath lower-left with origin
+        let toolpathStockHeight = 0; // Material thickness for starting position
+        let toolMesh = null; // 3D representation of cutting tool
+        let completedLine = null; // Line showing completed moves
+        let upcomingLine = null; // Line showing upcoming moves
+        // controls is already declared in global scope (line 273)
+
+        function initVisualization() {
+            const container = document.getElementById('canvas-container');
+            const canvas = document.getElementById('gcodeCanvas');
+
+            // Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0A0E14);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
+            camera.position.set(10, 10, 10);
+            camera.lookAt(0, 0, 0);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(5, 10, 7.5);
+            scene.add(directionalLight);
+
+            // Grid, axes, and origin marker will be added when G-code is loaded
+            // (sized appropriately for the part)
+
+            // Initialize OrbitControls (Onshape-style)
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.target.set(0, 0, 0); // Set rotation center to origin
+            controls.enableDamping = true; // Smooth camera movements
+            controls.dampingFactor = 0.1;
+            controls.screenSpacePanning = false; // Pan in the plane perpendicular to camera
+            controls.minDistance = 1;
+            controls.maxDistance = 500;
+            controls.maxPolarAngle = Math.PI; // Allow viewing from below
+
+            // Mouse button mapping (Onshape-style):
+            // Left: Rotate, Middle: Pan, Right: Zoom (disabled, use scroll instead)
+            controls.mouseButtons = {
+                LEFT: THREE.MOUSE.ROTATE,
+                MIDDLE: THREE.MOUSE.PAN,
+                RIGHT: null // Disable right-click zoom, use scroll wheel instead
+            };
+            controls.update(); // Apply initial settings
+
+            // Animate
+            animate();
+        }
+
+        function addAxisLabels() {
+            // Not needed - origin marker added in visualizeGcode with proper sizing
+        }
+
+        // Reset view button handler
+        document.getElementById('resetView').addEventListener('click', () => {
+            if (!controls) return;
+
+            // Reset camera position and target
+            camera.position.set(
+                optimalCameraPosition.x,
+                optimalCameraPosition.y,
+                optimalCameraPosition.z
+            );
+            controls.target.set(
+                optimalLookAtPosition.x,
+                optimalLookAtPosition.y,
+                optimalLookAtPosition.z
+            );
+            controls.update();
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (controls) controls.update(); // Update controls for damping
+            renderer.render(scene, camera);
+        }
+
+        /**
+         * Render DXF geometry entities with layer-specific colors on the stock top surface
+         * This shows the "cutting geometry" - the original design shapes
+         * Multi-layer DXFs render each layer at different depths with different colors
+         */
+        function renderDxfGeometry(scene, entities, zHeight, originCorner = 'bottom-left') {
+            if (!dxfBounds) return;
+
+            // Check if we have layer information (multi-layer DXF)
+            const hasLayers = dxfGeometry.layers && dxfGeometry.layerOrder;
+
+            // Group entities by layer if we have layer info
+            let layerGroups;
+            if (hasLayers) {
+                layerGroups = new Map();
+                entities.forEach(entity => {
+                    const layerName = entity.layer || '0';
+                    if (!layerGroups.has(layerName)) {
+                        layerGroups.set(layerName, []);
+                    }
+                    layerGroups.get(layerName).push(entity);
+                });
+            } else {
+                // Single layer - use white
+                layerGroups = new Map([['default', entities]]);
+            }
+
+            // Calculate rotated bounding box to determine offset
+            // We need to rotate all points, find their bounds, then offset so min is at (0,0)
+            const radians = -rotationAngle * Math.PI / 180;  // Negative for clockwise (to match backend)
+            const cos = Math.cos(radians);
+            const sin = Math.sin(radians);
+
+            // Helper to rotate a point around DXF center
+            function rotatePoint(x, y) {
+                // Translate to origin
+                const tx = x - dxfBounds.centerX;
+                const ty = y - dxfBounds.centerY;
+                // Rotate
+                const rx = tx * cos - ty * sin;
+                const ry = tx * sin + ty * cos;
+                // Translate back
+                return { x: rx + dxfBounds.centerX, y: ry + dxfBounds.centerY };
+            }
+
+            // First pass: find bounding box of rotated geometry
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+
+            entities.forEach(entity => {
+                function updateBounds(x, y) {
+                    const rotated = rotatePoint(x, y);
+                    minX = Math.min(minX, rotated.x);
+                    maxX = Math.max(maxX, rotated.x);
+                    minY = Math.min(minY, rotated.y);
+                    maxY = Math.max(maxY, rotated.y);
+                }
+
+                switch(entity.type) {
+                    case 'LINE':
+                        updateBounds(entity.vertices[0].x, entity.vertices[0].y);
+                        updateBounds(entity.vertices[1].x, entity.vertices[1].y);
+                        break;
+                    case 'CIRCLE':
+                        // Sample circle perimeter
+                        for (let i = 0; i < 8; i++) {
+                            const angle = (i / 8) * 2 * Math.PI;
+                            const x = entity.center.x + entity.radius * Math.cos(angle);
+                            const y = entity.center.y + entity.radius * Math.sin(angle);
+                            updateBounds(x, y);
+                        }
+                        break;
+                    case 'ARC':
+                        // Sample arc perimeter
+                        {
+                            const startAngle = (entity.startAngle || 0) * Math.PI / 180;
+                            let endAngle = (entity.endAngle || 360) * Math.PI / 180;
+
+                            // Handle angle wrapping
+                            if (endAngle < startAngle) {
+                                endAngle += 2 * Math.PI;
+                            }
+
+                            for (let i = 0; i <= 8; i++) {
+                                const t = i / 8;
+                                const angle = startAngle + (endAngle - startAngle) * t;
+                                const x = entity.center.x + entity.radius * Math.cos(angle);
+                                const y = entity.center.y + entity.radius * Math.sin(angle);
+                                updateBounds(x, y);
+                            }
+                        }
+                        break;
+                    case 'LWPOLYLINE':
+                    case 'POLYLINE':
+                        entity.vertices.forEach(v => updateBounds(v.x, v.y));
+                        break;
+                    case 'SPLINE':
+                        if (entity.controlPoints) {
+                            entity.controlPoints.forEach(p => updateBounds(p.x, p.y));
+                        }
+                        break;
+                }
+            });
+
+            console.log(`[DXF Bounds] After rotation: minX=${minX.toFixed(3)}, maxX=${maxX.toFixed(3)}, minY=${minY.toFixed(3)}, maxY=${maxY.toFixed(3)}`);
+            console.log(`[DXF Bounds] Width=${(maxX-minX).toFixed(3)}, Height=${(maxY-minY).toFixed(3)}`);
+
+            // Determine translation offsets based on origin corner
+            // The selected corner should become (0, 0)
+            let offsetX, offsetY;
+            switch (originCorner) {
+                case 'bottom-left':
+                    offsetX = -minX;
+                    offsetY = -minY;
+                    break;
+                case 'bottom-right':
+                    offsetX = -maxX;
+                    offsetY = -minY;
+                    break;
+                case 'top-left':
+                    offsetX = -minX;
+                    offsetY = -maxY;
+                    break;
+                case 'top-right':
+                    offsetX = -maxX;
+                    offsetY = -maxY;
+                    break;
+                default:
+                    offsetX = -minX;
+                    offsetY = -minY;
+            }
+
+            // Helper to transform a point: rotate around center, then translate based on origin corner
+            function transformPoint(x, y, machineDepth) {
+                // Rotate
+                const rotated = rotatePoint(x, y);
+                // Translate based on selected origin corner
+                const tx = rotated.x + offsetX;
+                const ty = rotated.y + offsetY;
+                // Map to Three.js coordinates: X -> X, Y at machine depth, Z -> -Y
+                return new THREE.Vector3(tx, machineDepth, -ty);
+            }
+
+            // Render each layer group with its assigned color
+            layerGroups.forEach((layerEntities, layerName) => {
+                // Get Z depth for this layer from the layers Map (already parsed correctly by organizeDxfLayers)
+                let cadDepth = 0; // Default to top surface
+                if (hasLayers && dxfGeometry.layers.has(layerName)) {
+                    const layerInfo = dxfGeometry.layers.get(layerName);
+                    cadDepth = layerInfo.depth !== null ? layerInfo.depth : 0;
+                }
+
+                // DXF layer depths are already in machine coordinates (Z=0 at bottom)
+                // Layer name like Z_0p236 means Z=0.236" up from bottom
+                // No conversion needed - use the value directly
+                const machineDepth = cadDepth;
+
+                console.log(`[DXF Render] Layer: ${layerName}, CAD depth: ${cadDepth.toFixed(3)}, Machine depth: ${machineDepth.toFixed(3)}, Entities: ${layerEntities.length}`);
+                // Get color for this layer
+                let layerColor = 0xFFFFFF; // Default to white
+                if (hasLayers && dxfGeometry.layers.has(layerName)) {
+                    layerColor = dxfGeometry.layers.get(layerName).color;
+                }
+
+                // Create material for this layer
+                const layerMaterial = new THREE.LineBasicMaterial({
+                    color: layerColor,
+                    linewidth: 2,
+                    opacity: 0.8,
+                    transparent: true
+                });
+
+                // Render all entities in this layer
+                layerEntities.forEach(entity => {
+                    let points = [];
+
+                    switch(entity.type) {
+                        case 'LINE':
+                            // Straight line from start to end
+                            points = [
+                                transformPoint(entity.vertices[0].x, entity.vertices[0].y, machineDepth),
+                                transformPoint(entity.vertices[1].x, entity.vertices[1].y, machineDepth)
+                            ];
+                            break;
+
+                        case 'CIRCLE':
+                            // Full circle - tessellate into line segments
+                            {
+                                const numPoints = 50;
+                                for (let i = 0; i <= numPoints; i++) {
+                                    const angle = (i / numPoints) * 2 * Math.PI;
+                                    const x = entity.center.x + entity.radius * Math.cos(angle);
+                                    const y = entity.center.y + entity.radius * Math.sin(angle);
+                                    points.push(transformPoint(x, y, machineDepth));
+                                }
+                            }
+                            break;
+
+                        case 'ARC':
+                            // Partial arc - tessellate into line segments
+                            {
+                                const startAngle = (entity.startAngle || 0) * Math.PI / 180;
+                                let endAngle = (entity.endAngle || 360) * Math.PI / 180;
+
+                                // Handle angle wrapping: if end < start, arc wraps through 0° (CCW)
+                                // Add 2π to end angle to get correct interpolation
+                                if (endAngle < startAngle) {
+                                    endAngle += 2 * Math.PI;
+                                }
+
+                                const numPoints = 50;
+
+                                for (let i = 0; i <= numPoints; i++) {
+                                    const t = i / numPoints;
+                                    const angle = startAngle + (endAngle - startAngle) * t;
+                                    const x = entity.center.x + entity.radius * Math.cos(angle);
+                                    const y = entity.center.y + entity.radius * Math.sin(angle);
+                                    points.push(transformPoint(x, y, machineDepth));
+                                }
+                            }
+                            break;
+
+                        case 'LWPOLYLINE':
+                        case 'POLYLINE':
+                            // Connected line segments through vertices
+                            points = entity.vertices.map(v => transformPoint(v.x, v.y, machineDepth));
+                            // Close the polyline if it's marked as closed
+                            if (entity.closed && points.length > 0) {
+                                points.push(points[0].clone());
+                            }
+                            break;
+
+                        case 'SPLINE':
+                            // Approximate spline with control points
+                            if (entity.controlPoints && entity.controlPoints.length > 1) {
+                                points = entity.controlPoints.map(p => transformPoint(p.x, p.y, machineDepth));
+                            }
+                            break;
+
+                        default:
+                            // Skip unsupported entity types
+                            return;
+                    }
+
+                    // Create and add the line to the scene
+                    if (points.length >= 2) {
+                        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                        const line = new THREE.Line(geometry, layerMaterial);
+                        scene.add(line);
+                    }
+                });
+            });
+        }
+
+        function visualizeGcode(gcode) {
+            // Parse G-code into moves
+            const lines = gcode.split('\n');
+            toolpathMoves = [];
+            let currentX = 0, currentY = 0, currentZ = 0;
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+            let minZ = Infinity, maxZ = -Infinity;
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith('(') || trimmed.startsWith(';') || !trimmed) continue;
+
+                const gMatch = trimmed.match(/^(G[0-3])/);
+                if (!gMatch) continue;
+
+                const moveType = gMatch[1];
+                const xMatch = trimmed.match(/X([-\d.]+)/);
+                const yMatch = trimmed.match(/Y([-\d.]+)/);
+                const zMatch = trimmed.match(/Z([-\d.]+)/);
+
+                const newX = xMatch ? parseFloat(xMatch[1]) : currentX;
+                const newY = yMatch ? parseFloat(yMatch[1]) : currentY;
+                const newZ = zMatch ? parseFloat(zMatch[1]) : currentZ;
+
+                // Handle arcs (G2 = CW, G3 = CCW)
+                if (moveType === 'G2' || moveType === 'G3') {
+                    const iMatch = trimmed.match(/I([-\d.]+)/);
+                    const jMatch = trimmed.match(/J([-\d.]+)/);
+
+                    if (iMatch && jMatch) {
+                        const arcI = parseFloat(iMatch[1]);
+                        const arcJ = parseFloat(jMatch[1]);
+
+                        // Arc center (incremental from start point - G91.1 mode)
+                        const centerX = currentX + arcI;
+                        const centerY = currentY + arcJ;
+
+                        // Calculate arc parameters
+                        const startAngle = Math.atan2(currentY - centerY, currentX - centerX);
+                        const endAngle = Math.atan2(newY - centerY, newX - centerX);
+                        const radius = Math.sqrt(arcI * arcI + arcJ * arcJ);
+
+                        // Determine sweep direction and angle
+                        let sweepAngle = endAngle - startAngle;
+
+                        // Handle G2 (clockwise) vs G3 (counterclockwise)
+                        const isClockwise = moveType === 'G2';
+
+                        // Normalize sweep angle
+                        if (isClockwise) {
+                            // For CW, sweep should be negative
+                            if (sweepAngle > 0) sweepAngle -= 2 * Math.PI;
+                            // Handle full circles (start == end)
+                            if (Math.abs(sweepAngle) < 0.001) sweepAngle = -2 * Math.PI;
+                        } else {
+                            // For CCW, sweep should be positive
+                            if (sweepAngle < 0) sweepAngle += 2 * Math.PI;
+                            // Handle full circles (start == end)
+                            if (Math.abs(sweepAngle) < 0.001) sweepAngle = 2 * Math.PI;
+                        }
+
+                        // Validate arc parameters
+                        if (isNaN(radius) || radius <= 0 || isNaN(sweepAngle)) {
+                            console.warn('Invalid arc parameters:', { radius, sweepAngle, centerX, centerY });
+                            continue;
+                        }
+
+                        // Save start position before tessellation
+                        const startX = currentX;
+                        const startY = currentY;
+                        const startZ = currentZ;
+
+                        // Tessellate arc into line segments
+                        const numSegments = Math.max(8, Math.ceil(Math.abs(sweepAngle) * radius * 10));
+                        const zStep = (newZ - startZ) / numSegments;
+
+                        for (let i = 0; i < numSegments; i++) {
+                            const t = (i + 1) / numSegments;
+                            const angle = startAngle + sweepAngle * t;
+                            const arcX = centerX + radius * Math.cos(angle);
+                            const arcY = centerY + radius * Math.sin(angle);
+                            const arcZ = startZ + zStep * (i + 1);
+
+                            // Validate segment
+                            if (isNaN(arcX) || isNaN(arcY) || isNaN(arcZ)) {
+                                console.warn('Invalid arc segment:', { arcX, arcY, arcZ });
+                                continue;
+                            }
+
+                            toolpathMoves.push({
+                                type: moveType,
+                                from: { x: currentX, y: currentY, z: currentZ },
+                                to: { x: arcX, y: arcY, z: arcZ },
+                                line: trimmed
+                            });
+
+                            currentX = arcX;
+                            currentY = arcY;
+                            currentZ = arcZ;
+
+                            minX = Math.min(minX, currentX);
+                            maxX = Math.max(maxX, currentX);
+                            minY = Math.min(minY, currentY);
+                            maxY = Math.max(maxY, currentY);
+                            minZ = Math.min(minZ, currentZ);
+                            maxZ = Math.max(maxZ, currentZ);
+                        }
+
+                        continue; // Skip the linear move handling below
+                    }
+                }
+
+                // Linear moves (G0, G1) or arcs without I/J
+                if (newX !== currentX || newY !== currentY || newZ !== currentZ) {
+                    toolpathMoves.push({
+                        type: moveType,
+                        from: { x: currentX, y: currentY, z: currentZ },
+                        to: { x: newX, y: newY, z: newZ },
+                        line: trimmed
+                    });
+
+                    currentX = newX;
+                    currentY = newY;
+                    currentZ = newZ;
+
+                    minX = Math.min(minX, currentX);
+                    maxX = Math.max(maxX, currentX);
+                    minY = Math.min(minY, currentY);
+                    maxY = Math.max(maxY, currentY);
+                    minZ = Math.min(minZ, currentZ);
+                    maxZ = Math.max(maxZ, currentZ);
+                }
+            }
+
+            console.log('Arc parsing complete. Total moves:', toolpathMoves.length);
+            console.log('Bounds:', { minX, maxX, minY, maxY, minZ, maxZ });
+            console.log('First 5 moves:', toolpathMoves.slice(0, 5));
+
+            if (toolpathMoves.length === 0) return;
+
+            // Do NOT offset toolpath coordinates - G-code coordinates are already correct
+            // Tool centers can be negative (outside part bounds by tool radius)
+            toolpathOffsetX = 0;
+            toolpathOffsetY = 0;
+
+            // Clear old visualization
+            const toRemove = [];
+            scene.children.forEach(child => {
+                if (!(child instanceof THREE.AmbientLight) && !(child instanceof THREE.DirectionalLight)) {
+                    toRemove.push(child);
+                }
+            });
+            toRemove.forEach(child => scene.remove(child));
+            completedLine = null;
+            upcomingLine = null;
+            toolMesh = null;
+
+            // Add grid and axes
+            const maxDimension = Math.max(maxX, maxY, maxZ);
+            const gridSize = Math.max(maxX * 1.3, maxY * 1.3, 15);
+            const gridHelper = new THREE.GridHelper(gridSize, Math.ceil(gridSize), 0x30363D, 0x1E2632);
+            gridHelper.position.set(gridSize / 3, 0, -gridSize / 3);
+            scene.add(gridHelper);
+
+            const axisLength = Math.max(maxDimension, 5) * 1.2;
+            const axesHelper = new THREE.AxesHelper(axisLength);
+            scene.add(axesHelper);
+
+            const markerSize = Math.max(0.15, maxDimension * 0.02);
+            const originMarker = new THREE.Mesh(
+                new THREE.SphereGeometry(markerSize, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0xFFFFFF })
+            );
+            scene.add(originMarker);
+
+            // Get actual material thickness for visualization
+            const material = document.getElementById('material').value;
+            const isAluminumTube = (material === 'aluminum_tube');
+            const materialThickness = parseFloat(document.getElementById('thickness').value);
+
+            // Store for toolpath starting position
+            toolpathStockHeight = materialThickness;
+
+            // For tube mode, use tube height as stock height instead of wall thickness
+            const stockHeightValue = isAluminumTube ?
+                parseFloat(document.getElementById('tubeHeight').value) :
+                materialThickness;
+
+            // Material boundaries (at material top surface)
+            // Translate so lower-left is at origin (to match DXF render)
+            const materialOutline = new THREE.Line(
+                new THREE.BufferGeometry().setFromPoints([
+                    new THREE.Vector3(0, materialThickness, 0),
+                    new THREE.Vector3(maxX - minX, materialThickness, 0),
+                    new THREE.Vector3(maxX - minX, materialThickness, -(maxY - minY)),
+                    new THREE.Vector3(0, materialThickness, -(maxY - minY)),
+                    new THREE.Vector3(0, materialThickness, 0)
+                ]),
+                new THREE.LineBasicMaterial({ color: 0x8B949E, linewidth: 1, opacity: 0.5, transparent: true })
+            );
+            scene.add(materialOutline);
+
+            const sacrificeOutline = new THREE.Line(
+                new THREE.BufferGeometry().setFromPoints([
+                    new THREE.Vector3(0, 0, 0),
+                    new THREE.Vector3(maxX - minX, 0, 0),
+                    new THREE.Vector3(maxX - minX, 0, -(maxY - minY)),
+                    new THREE.Vector3(0, 0, -(maxY - minY)),
+                    new THREE.Vector3(0, 0, 0)
+                ]),
+                new THREE.LineBasicMaterial({ color: 0x8B949E, linewidth: 1, opacity: 0.3, transparent: true })
+            );
+            scene.add(sacrificeOutline);
+
+            // Add stock material as semi-transparent solid
+            const stockHeight = stockHeightValue; // Use tube height for tubes, thickness for plates
+
+            // Calculate stock dimensions
+            let stockWidth, stockDepth;
+            let stockCenterX, stockCenterZ; // Center position for stock box
+
+            // Calculate and display stock size
+            const toolDiameter = parseFloat(document.getElementById('toolDiameter').value) || 0.157;
+            const stockSizeDisplay = document.getElementById('stockSizeDisplay');
+            const stockSizeValue = document.getElementById('stockSizeValue');
+
+            if (isAluminumTube) {
+                // For tube: use DXF pattern dimensions for stock box (actual tube size)
+                // Account for rotation
+                let dxfWidth = dxfBounds ? dxfBounds.width : (maxX - minX);
+                let dxfHeight = dxfBounds ? dxfBounds.height : (maxY - minY);
+                if (rotationAngle === 90 || rotationAngle === 270) {
+                    [dxfWidth, dxfHeight] = [dxfHeight, dxfWidth];
+                }
+
+                stockWidth = dxfWidth;
+                stockDepth = dxfHeight;
+                // Position stock with lower-left at origin (to match DXF render)
+                stockCenterX = stockWidth / 2;
+                stockCenterZ = -stockDepth / 2;
+
+                // Display tube size
+                const tubeHeightInput = parseFloat(document.getElementById('tubeHeight').value) || 1.0;
+                const dxfShort = dxfBounds ? Math.min(dxfBounds.width, dxfBounds.height) : Math.min(stockWidth, stockDepth);
+                const tubeLength = dxfBounds ? Math.max(dxfBounds.width, dxfBounds.height) : Math.max(stockWidth, stockDepth);
+
+                if (stockSizeDisplay && stockSizeValue) {
+                    // Display as: width × height × length
+                    stockSizeValue.textContent = `${dxfShort.toFixed(0)}" × ${tubeHeightInput.toFixed(0)}" × ${tubeLength.toFixed(3)}"`;
+                    stockSizeDisplay.style.display = 'flex';
+                }
+            } else {
+                // For plates: use toolpath extents (show where the tool moves)
+                stockWidth = maxX - minX;
+                stockDepth = maxY - minY;
+                // Position stock with lower-left at origin (to match DXF render)
+                stockCenterX = stockWidth / 2;
+                stockCenterZ = -stockDepth / 2;
+
+                // Display stock size: DXF bounding box + tool margin only if cutting perimeter
+                // Account for rotation - swap DXF dimensions if rotated 90 or 270 degrees
+                let dxfWidth = dxfBounds ? dxfBounds.width : stockWidth;
+                let dxfHeight = dxfBounds ? dxfBounds.height : stockDepth;
+                if (rotationAngle === 90 || rotationAngle === 270) {
+                    [dxfWidth, dxfHeight] = [dxfHeight, dxfWidth];
+                }
+
+                // Check if toolpath extends beyond DXF bounds (indicating perimeter cutting)
+                const tolerance = 0.01;
+                const toolpathWidth = maxX - minX;
+                const toolpathHeight = maxY - minY;
+
+                // If toolpath is larger than DXF bounds, tool is cutting outside the part on that axis
+                const cutsOutsideX = toolpathWidth > dxfWidth + tolerance;
+                const cutsOutsideY = toolpathHeight > dxfHeight + tolerance;
+
+                // Only add margin on axes where tool cuts outside the part
+                const fullStockWidth = dxfWidth + (cutsOutsideX ? 2 * toolDiameter : 0);
+                const fullStockDepth = dxfHeight + (cutsOutsideY ? 2 * toolDiameter : 0);
+
+                if (stockSizeDisplay && stockSizeValue) {
+                    stockSizeValue.textContent = `${fullStockWidth.toFixed(3)}" × ${fullStockDepth.toFixed(3)}"`;
+                    stockSizeDisplay.style.display = 'flex';
+                }
+            }
+
+            const stockGeometry = new THREE.BoxGeometry(stockWidth, stockHeight, stockDepth);
+            const stockMaterial = new THREE.MeshStandardMaterial({
+                color: 0xE8F0FF, // Light blue-white (aluminum-ish)
+                transparent: true,
+                opacity: 0.15, // More transparent so toolpaths show through
+                metalness: 0.3,
+                roughness: 0.7,
+                side: THREE.DoubleSide,
+                depthWrite: false // Critical! Allows lines to render through transparent material
+            });
+
+            const stockMesh = new THREE.Mesh(stockGeometry, stockMaterial);
+            // Position at center of stock, halfway up from sacrifice board
+            stockMesh.position.set(
+                stockCenterX,
+                stockHeight / 2,
+                stockCenterZ
+            );
+            stockMesh.renderOrder = -1; // Render stock before toolpaths
+            scene.add(stockMesh);
+
+            // Render DXF geometry overlay (white lines on stock top surface)
+            if (dxfGeometry && dxfGeometry.entities) {
+                renderDxfGeometry(scene, dxfGeometry.entities, stockHeight);
+            }
+
+            // Create tool representation (endmill)
+            const toolLength = Math.max(maxZ * 1.5, 1.0);
+            const toolGeometry = new THREE.CylinderGeometry(
+                toolDiameter / 2, 
+                toolDiameter / 2, 
+                toolLength, 
+                16
+            );
+            const toolMaterial = new THREE.MeshStandardMaterial({
+                color: 0xC0C0C0, // Silver
+                metalness: 0.8,
+                roughness: 0.2,
+                emissive: 0x404040
+            });
+            toolMesh = new THREE.Mesh(toolGeometry, toolMaterial);
+            toolMesh.userData.toolLength = toolLength; // Store for positioning
+            scene.add(toolMesh);
+
+            // Initialize toolpath lines
+            updateToolpathDisplay(0);
+
+            // Setup scrubber
+            const scrubber = document.getElementById('toolpathScrubber');
+            const scrubberContainer = document.getElementById('scrubberContainer');
+            scrubberContainer.style.display = 'block';
+            
+            scrubber.max = toolpathMoves.length - 1;
+            scrubber.value = 0;
+            
+            scrubber.oninput = (e) => {
+                const moveIndex = parseInt(e.target.value);
+                updateToolpathDisplay(moveIndex);
+            };
+
+            // Show playback controls
+            document.getElementById('playbackControls').style.display = 'flex';
+
+            let isPlaying = false;
+            let playbackInterval = null;
+            let playbackSpeed = 40; // moves per second (default 1x speed)
+
+            // Get playback controls
+            const playButton = document.getElementById('playButton');
+            const restartButton = document.getElementById('restartButton');
+            const playbackSpeedSelect = document.getElementById('playbackSpeed');
+            const playIcon = playButton.querySelector('.play-icon');
+            const pauseIcon = playButton.querySelector('.pause-icon');
+
+            // Play/Pause button handler
+            playButton.addEventListener('click', () => {
+                if (isPlaying) {
+                    stopPlayback();
+                } else {
+                    startPlayback();
+                }
+            });
+
+            // Restart button handler
+            restartButton.addEventListener('click', () => {
+                scrubber.value = 0;
+                updateToolpathDisplay(0);
+                if (isPlaying) {
+                    stopPlayback();
+                    setTimeout(startPlayback, 100); // Brief pause before restart
+                }
+            });
+
+            // Speed selector handler
+            playbackSpeedSelect.addEventListener('change', (e) => {
+                playbackSpeed = parseInt(e.target.value);
+                if (isPlaying) {
+                    // Restart playback with new speed
+                    stopPlayback();
+                    startPlayback();
+                }
+            });
+
+            function startPlayback() {
+                isPlaying = true;
+                playButton.classList.add('playing');
+                playIcon.style.display = 'none';
+                pauseIcon.style.display = 'block';
+
+                // Calculate interval based on speed (moves per second)
+                const intervalMs = 1000 / playbackSpeed;
+
+                playbackInterval = setInterval(() => {
+                    const currentValue = parseInt(scrubber.value);
+                    const maxValue = parseInt(scrubber.max);
+
+                    if (currentValue >= maxValue) {
+                        stopPlayback();
+                        return;
+                    }
+
+                    scrubber.value = currentValue + 1;
+                    updateToolpathDisplay(currentValue + 1);
+                }, intervalMs);
+            }
+
+            function stopPlayback() {
+                isPlaying = false;
+                playButton.classList.remove('playing');
+                playIcon.style.display = 'block';
+                pauseIcon.style.display = 'none';
+
+                if (playbackInterval) {
+                    clearInterval(playbackInterval);
+                    playbackInterval = null;
+                }
+            }
+
+            // Camera positioning
+            const viewDist = Math.max(maxX, maxY, maxZ) * 2;
+            camera.position.set(viewDist * 0.7, viewDist * 0.7, viewDist * 0.7);
+
+            optimalCameraPosition = { x: camera.position.x, y: camera.position.y, z: camera.position.z };
+            optimalLookAtPosition = { x: maxX / 3, y: maxZ / 3, z: -maxY / 3 };
+
+            // Set OrbitControls target (rotation center)
+            if (controls) {
+                controls.target.set(optimalLookAtPosition.x, optimalLookAtPosition.y, optimalLookAtPosition.z);
+                controls.update();
+            } else {
+                camera.lookAt(optimalLookAtPosition.x, optimalLookAtPosition.y, optimalLookAtPosition.z);
+            }
+
+            document.querySelector('.empty-state').style.display = 'none';
+        }
+
+        function updateToolpathDisplay(moveIndex) {
+            if (toolpathMoves.length === 0) return;
+
+            // Update scrubber labels
+            document.getElementById('scrubberLabel').textContent = 
+                `Move ${moveIndex + 1} of ${toolpathMoves.length}`;
+            
+            const currentMove = toolpathMoves[moveIndex];
+            const moveType = currentMove.type === 'G0' ? 'Rapid' : 'Cut';
+            document.getElementById('scrubberOperation').textContent =
+                `${moveType}: ${currentMove.line}`;
+
+            // Update tool position
+            if (toolMesh) {
+                // At move 0, show tool at starting position (above stock)
+                // Otherwise show tool at the destination of the current move
+                let x, y, z;
+                if (moveIndex === 0) {
+                    // Starting position - use from coordinates with Z above stock
+                    x = currentMove.from.x - toolpathOffsetX;
+                    y = currentMove.from.y - toolpathOffsetY;
+                    z = (!currentMove.from.z || currentMove.from.z === 0)
+                        ? toolpathStockHeight + 0.5
+                        : currentMove.from.z;
+                } else {
+                    // Normal position - at destination of current move
+                    const pos = currentMove.to;
+                    x = pos.x - toolpathOffsetX;
+                    y = pos.y - toolpathOffsetY;
+                    z = pos.z;
+                }
+
+                // Position tool so BOTTOM is at Z coordinate, not center
+                // Cylinder center needs to be offset up by half its length
+                const toolLength = toolMesh.userData.toolLength;
+                toolMesh.position.set(x, z + toolLength / 2, -y);
+            }
+
+            // Remove old toolpath lines
+            if (completedLine) scene.remove(completedLine);
+            if (upcomingLine) scene.remove(upcomingLine);
+
+            // Build upcoming path first (gold) - draw this first so completed renders on top
+            if (moveIndex < toolpathMoves.length - 1) {
+                const upcomingPoints = [];
+                for (let i = moveIndex; i < toolpathMoves.length; i++) {
+                    const move = toolpathMoves[i];
+                    if (i === moveIndex) {
+                        const fromX = move.from.x - toolpathOffsetX;
+                        const fromY = move.from.y - toolpathOffsetY;
+                        // For the very first move, use a starting Z position above the stock
+                        const fromZ = (i === 0 && (!move.from.z || move.from.z === 0))
+                            ? toolpathStockHeight + 0.5
+                            : move.from.z;
+                        upcomingPoints.push(new THREE.Vector3(fromX, fromZ, -fromY));
+                    }
+                    const toX = move.to.x - toolpathOffsetX;
+                    const toY = move.to.y - toolpathOffsetY;
+                    upcomingPoints.push(new THREE.Vector3(toX, move.to.z, -toY));
+                }
+                const upcomingGeometry = new THREE.BufferGeometry().setFromPoints(upcomingPoints);
+                upcomingLine = new THREE.Line(
+                    upcomingGeometry,
+                    new THREE.LineBasicMaterial({
+                        color: 0xFDB515,
+                        linewidth: 3,
+                        opacity: 0.8,
+                        transparent: true
+                    })
+                );
+                scene.add(upcomingLine);
+            }
+
+            // Build completed path (green) - draw this last so it's on top
+            if (moveIndex > 0) {
+                const completedPoints = [];
+                for (let i = 0; i <= moveIndex; i++) {
+                    const move = toolpathMoves[i];
+                    if (i === 0) {
+                        const fromX = move.from.x - toolpathOffsetX;
+                        const fromY = move.from.y - toolpathOffsetY;
+                        // For the very first move, use a starting Z position above the stock
+                        const fromZ = (!move.from.z || move.from.z === 0)
+                            ? toolpathStockHeight + 0.5
+                            : move.from.z;
+                        completedPoints.push(new THREE.Vector3(fromX, fromZ, -fromY));
+                    }
+                    const toX = move.to.x - toolpathOffsetX;
+                    const toY = move.to.y - toolpathOffsetY;
+                    completedPoints.push(new THREE.Vector3(toX, move.to.z, -toY));
+                }
+                const completedGeometry = new THREE.BufferGeometry().setFromPoints(completedPoints);
+                completedLine = new THREE.Line(
+                    completedGeometry,
+                    new THREE.LineBasicMaterial({ color: 0x2EA043, linewidth: 3 })
+                );
+                scene.add(completedLine);
+            }
+        }
+
+        // Initialize on load
+        // Initialize on load
+        window.addEventListener('load', () => {
+            initVisualization();
+            initDxfSetup();
+
+            // DEBUG: Check if Onshape provides context via JavaScript
+            console.log('=== Onshape Context Debug ===');
+            console.log('window.opener:', window.opener);
+            console.log('window.parent:', window.parent);
+            console.log('URL params:', new URLSearchParams(window.location.search));
+            console.log('Onshape globals:', {
+                onshape: typeof window.onshape !== 'undefined' ? window.onshape : 'undefined',
+                OnshapeClient: typeof window.OnshapeClient !== 'undefined' ? window.OnshapeClient : 'undefined'
+            });
+
+            // Check for error message from Onshape import
+            const errorMessage = window.ONSHAPE_DATA?.errorMessage || '';
+            if (errorMessage) {
+                const statusDiv = document.getElementById('statusMessage');
+                if (statusDiv) {
+                    statusDiv.textContent = '❌ ' + errorMessage;
+                    statusDiv.style.display = 'block';
+                    statusDiv.className = 'error';
+                }
+                return; // Don't try to load DXF
+            }
+
+            // Show info alert if using default config
+            const usingDefaultConfig = window.ONSHAPE_DATA?.usingDefaultConfig || false;
+            if (usingDefaultConfig) {
+                const configInfoAlert = document.getElementById('configInfoAlert');
+                if (configInfoAlert) {
+                    configInfoAlert.style.display = 'block';
+                }
+            }
+
+            // Auto-load DXF if coming from Onshape
+            const dxfFile = window.ONSHAPE_DATA?.dxfFile || '';
+            const fromOnshape = window.ONSHAPE_DATA?.fromOnshape || false;
+            const onshapeSuggestedFilename = window.ONSHAPE_DATA?.suggestedFilename || '';
+            
+            const dxfContentInline = window.ONSHAPE_DATA?.dxfContentInline || null;
+
+            // ── Multi-part Onshape import ──────────────────────────────────
+            const dxfFiles = window.ONSHAPE_DATA?.dxfFiles || null;
+
+            if (dxfFiles && dxfFiles.length > 0 && fromOnshape) {
+                console.log(`Auto-loading ${dxfFiles.length} DXF(s) from Onshape multi-part import`);
+
+                const files = dxfFiles.map(({ filename, content }, index) => {
+                    const blob = new Blob([content], { type: 'application/dxf' });
+                    return new File([blob], filename, { type: 'application/dxf' });
+                });
+
+                appState.uploadedFiles = files;
+                appState.uploadedFile = files[0];
+                appState.suggestedFilename = null;
+
+                // Onshape multi-part import exports layered DXFs. Force 2.5D
+                // on the main page so Generate uses the multilayer path.
+                const use25dEl = document.getElementById('use25d');
+                if (use25dEl) {
+                    use25dEl.checked = true;
+                    use25dEl.dispatchEvent(new Event('change'));
+                }
+
+                const fileNameEl = document.getElementById('fileName');
+                const fileSizeEl = document.getElementById('fileSize');
+                const fileLoadedCardEl = document.getElementById('fileLoadedCard');
+                const dropZoneEl = document.getElementById('dropZone');
+                const generateBtnEl = document.getElementById('generateBtn');
+
+                const totalBytes = dxfFiles.reduce((sum, f) => sum + f.content.length, 0);
+                if (fileNameEl) fileNameEl.textContent = `${files.length} selected part(s)`;
+                if (fileSizeEl) fileSizeEl.textContent = formatFileSize(totalBytes);
+                if (dropZoneEl) dropZoneEl.style.display = 'none';
+                if (fileLoadedCardEl) fileLoadedCardEl.style.display = 'block';
+                if (generateBtnEl) {
+                    generateBtnEl.disabled = false;
+                    generateBtnEl.textContent = '🚀 Generate Program';
+                }
+
+                // Build composite preview for all imported parts
+                if (files.length > 1) {
+                    buildNestedPreviewFromFiles(files).catch(error => {
+                        console.error('Failed to build Onshape composite preview:', error);
+                        if (dxfFiles[0] && dxfFiles[0].content) {
+                            parseDxfForSetup(dxfFiles[0].content);
+                        }
+                    });
+                } else if (dxfFiles[0] && dxfFiles[0].content) {
+                    parseDxfForSetup(dxfFiles[0].content);
+                }
+
+                const statusDiv = document.getElementById('statusMessage');
+                if (statusDiv) {
+                    statusDiv.textContent = `✅ Imported ${files.length} part(s) from Onshape! Click Generate Program to continue.`;
+                    statusDiv.style.display = 'block';
+                }
+
+            } else if (dxfFile && fromOnshape) {
+            // ── Single-part Onshape import (existing) ─────────────────────
+                console.log('Auto-loading DXF from Onshape:', dxfFile);
+
+                // Use inline DXF content if available (avoids cross-instance 404 on Vercel)
+                const dxfPromise = dxfContentInline
+                    ? Promise.resolve(dxfContentInline)
+                    : fetch(`/uploads/${dxfFile}`)
+                        .then(response => {
+                            console.log('Fetch response:', response.status, response.statusText);
+                            if (!response.ok) {
+                                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                            }
+                            return response.text();
+                        });
+
+                dxfPromise
+                    .then(dxfContent => {
+                        console.log('DXF content received:', dxfContent.length, 'bytes');
+                        console.log('First 200 chars:', dxfContent.substring(0, 200));
+
+                        // Create a File object from the DXF content
+                        // Use suggested filename (not token) for the File object name
+                        const filename = onshapeSuggestedFilename ?
+                            `${onshapeSuggestedFilename}.dxf` :
+                            (dxfFile.endsWith('.dxf') ? dxfFile : `${dxfFile}.dxf`);
+                        const blob = new Blob([dxfContent], { type: 'application/dxf' });
+                        const file = new File([blob], filename, { type: 'application/dxf' });
+
+                        // Use appState to store file (accessible across scopes)
+                        appState.uploadedFile = file;
+                        appState.uploadedFiles = [file];
+                        appState.suggestedFilename = onshapeSuggestedFilename || null;
+
+                        // Update UI elements
+                        const fileNameEl = document.getElementById('fileName');
+                        const fileSizeEl = document.getElementById('fileSize');
+                        const fileLoadedCardEl = document.getElementById('fileLoadedCard');
+                        const dropZoneEl = document.getElementById('dropZone');
+                        const generateBtnEl = document.getElementById('generateBtn');
+
+                        if (fileNameEl) fileNameEl.textContent = filename;
+                        if (fileSizeEl) fileSizeEl.textContent = formatFileSize(dxfContent.length);
+
+                        // Show file loaded card, hide drop zone
+                        if (dropZoneEl) dropZoneEl.style.display = 'none';
+                        if (fileLoadedCardEl) fileLoadedCardEl.style.display = 'block';
+
+                        if (generateBtnEl) {
+                            generateBtnEl.disabled = false;
+                            generateBtnEl.textContent = '🚀 Generate Program';
+                        }
+
+                        // Parse for 2D setup view
+                        parseDxfForSetup(dxfContent);
+
+                        // Show success message
+                        const statusDiv = document.getElementById('statusMessage');
+                        if (statusDiv) {
+                            statusDiv.textContent = '✅ Imported from Onshape! Orient your part and click Generate G-code.';
+                            statusDiv.style.display = 'block';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error loading DXF:', error);
+                        const statusDiv = document.getElementById('statusMessage');
+                        if (statusDiv) {
+                            statusDiv.textContent = `❌ Failed to load DXF: ${error.message}`;
+                            statusDiv.style.display = 'block';
+                            statusDiv.className = 'error';
+                        }
+                    });
+            }
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            const container = document.getElementById('canvas-container');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            
+            // Also resize DXF canvas to maintain correct aspect ratio
+            if (dxfCanvas2D && dxfGeometry) {
+                const rect = dxfCanvas2D.getBoundingClientRect();
+                dxfCanvas2D.width = rect.width;
+                dxfCanvas2D.height = rect.height;
+                renderDxfSetup(); // Re-render with new size
+            }
+        });
+});
