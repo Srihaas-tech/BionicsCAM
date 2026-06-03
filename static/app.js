@@ -148,8 +148,11 @@ function rotateEntityForPreview(entity, rotate90, partBounds) {
 }
 
 function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'auto') {
-    const ordered = [...parts].sort((a, b) => b.area - a.area);
-    const placements = [];
+    const ordered = parts
+        .map((part, index) => ({ part, index }))
+        .sort((a, b) => b.part.area - a.part.area);
+
+    const placements = new Array(parts.length);
     let xCursor = 0;
     let yCursor = 0;
     let rowHeight = 0;
@@ -165,7 +168,7 @@ function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'au
         return part.height < part.width;
     };
 
-    for (const part of ordered) {
+    for (const { part, index } of ordered) {
         const rotate90 = chooseRotate(part);
         const slotW = rotate90 ? part.height : part.width;
         const slotH = rotate90 ? part.width : part.height;
@@ -177,10 +180,12 @@ function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'au
         }
 
         if (yCursor + slotH > stockHeight) {
-            throw new Error(`Not enough stock space for ${part.name}: need ${slotW.toFixed(3)}" × ${slotH.toFixed(3)}" but only ${(stockWidth - xCursor).toFixed(3)}" × ${(stockHeight - yCursor).toFixed(3)}" remained.`);
+            const partName = part.name || `Part ${index + 1}`;
+            throw new Error(`Not enough stock space for ${partName}: need ${slotW.toFixed(3)}" × ${slotH.toFixed(3)}" but only ${(stockWidth - xCursor).toFixed(3)}" × ${(stockHeight - yCursor).toFixed(3)}" remained.`);
         }
 
-        placements.push({
+        placements[index] = {
+            partIndex: index,
             name: part.name,
             rotate90,
             x: xCursor,
@@ -188,7 +193,7 @@ function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'au
             width: slotW,
             height: slotH,
             part
-        });
+        };
 
         xCursor += slotW + gap;
         rowHeight = Math.max(rowHeight, slotH);
@@ -217,6 +222,9 @@ function buildCompositePreviewGeometry(parts, placements, stockWidth, stockHeigh
 
     parts.forEach((part, idx) => {
         const placement = placements[idx];
+        if (!placement) {
+            throw new Error(`Missing placement for part ${idx + 1}`);
+        }
         part.geometry.entities.forEach(entity => {
             entities.push(translateEntity(entity, placement.x, placement.y, placement.rotate90, part.bounds));
         });
@@ -1229,7 +1237,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const content = await file.text();
                 parseDxfManually(content);
                 parts.push({
-                    name: `Part ${parts.length + 1}`,
+                    name: '',
                     filename: file.name,
                     geometry: JSON.parse(JSON.stringify(dxfGeometry)),
                     bounds: { ...dxfBounds },
