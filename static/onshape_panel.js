@@ -94,13 +94,11 @@
             }
 
             if (importAllPartsBtn) {
-                importAllPartsBtn.textContent = getSelectedFaceIds().length >= 1
-                    ? '⬆ Import selected part(s) as 2.5D'
-                    : '⬆ Import all parts as 2.5D';
+                importAllPartsBtn.textContent = '⬆ Import selected part(s) as 2.5D';
             }
 
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture, or import all parts';
+                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture, then import the selected part(s)';
                 instruction.style.color = '';
             }
         } else {
@@ -113,13 +111,11 @@
             }
 
             if (importAllPartsBtn) {
-                importAllPartsBtn.textContent = getSelectedFaceIds().length >= 1
-                    ? '⬆ Import selected part(s) as 2D'
-                    : '⬆ Import all parts as 2D';
+                importAllPartsBtn.textContent = '⬆ Import selected part(s) as 2D';
             }
 
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture, or import all parts';
+                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture, then import the selected part(s)';
                 instruction.style.color = '';
             }
         }
@@ -288,19 +284,23 @@
         const isMultilayer = multilayerCheckbox && multilayerCheckbox.checked;
         const selectedFaceIds = getSelectedFaceIds();
 
+        if (!selectedFaceIds.length) {
+            instruction.innerHTML = 'Select one or more faces first, then import the selected part(s).';
+            instruction.style.color = '#b45309';
+            instruction.style.display = 'block';
+            return;
+        }
+
         const params = new URLSearchParams({
             documentId: context.documentId,
             workspaceId: context.workspaceId,
             elementId: context.elementId,
             server: context.server || 'https://cad.onshape.com',
             multilayer: isMultilayer ? 'true' : 'false',
-            multi: 'true'
+            multi: 'true',
+            selectedOnly: 'true',
+            faceIds: selectedFaceIds.join(',')
         });
-
-        if (selectedFaceIds.length >= 1) {
-            params.append('faceIds', selectedFaceIds.join(','));
-            params.append('selectedOnly', 'true');
-        }
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
 
