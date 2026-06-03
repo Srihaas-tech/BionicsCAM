@@ -140,13 +140,17 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
                     if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
         return '\n'.join(lines[start:end])
 
+    # Shelf pack largest parts first. This keeps V1 predictable and prevents
+    # small parts from fragmenting the first row before large plates are placed.
+    sorted_parts = sorted(parts, key=lambda p: (p.get('part_w', 0) * p.get('part_h', 0)), reverse=True)
+
     placements = []
     x_cursor = 0.0
     y_cursor = 0.0
     row_height = 0.0
     max_x_used = 0.0
 
-    for idx, part in enumerate(parts):
+    for idx, part in enumerate(sorted_parts):
         do_rotate = choose_rotation(part)
         if do_rotate:
             slot_w, slot_h = part['part_h'], part['part_w']
@@ -555,55 +559,9 @@ def generate_onshape_filename(doc_name, part_name):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return f"Onshape_Part_{timestamp}"
 
-
-def get_deployed_commit_sha():
-    """Return the commit SHA associated with this deployment, if available."""
-    for env_name in (
-        'VERCEL_GIT_COMMIT_SHA',
-        'GITHUB_SHA',
-        'COMMIT_SHA',
-        'DEPLOYMENT_COMMIT_SHA',
-    ):
-        sha = os.environ.get(env_name)
-        if sha:
-            return sha.strip()
-
-    # Local fallback for development environments that still have a .git directory.
-    repo_root = Path(__file__).resolve().parent
-    head_path = repo_root / '.git' / 'HEAD'
-    try:
-        if head_path.exists():
-            head = head_path.read_text(encoding='utf-8').strip()
-            if head.startswith('ref: '):
-                ref_path = repo_root / '.git' / head[5:]
-                if ref_path.exists():
-                    return ref_path.read_text(encoding='utf-8').strip()
-            if re.fullmatch(r'[0-9a-fA-F]{7,40}', head):
-                return head
-    except Exception:
-        pass
-
-    return None
-
-
 # ============================================================================
 # Routes
 # ============================================================================
-
-
-@app.route('/api/build-info')
-def build_info():
-    """Return build metadata so the userscript can detect deployed commits."""
-    commit_sha = get_deployed_commit_sha()
-    source = 'environment' if commit_sha else 'unknown'
-
-    return jsonify({
-        'commitSha': commit_sha,
-        'deploymentTarget': os.environ.get('VERCEL_ENV') or os.environ.get('DEPLOYMENT_TARGET') or 'unknown',
-        'projectName': os.environ.get('VERCEL_PROJECT_NAME') or 'BionicsCAM',
-        'deployedAt': os.environ.get('VERCEL_DEPLOYMENT_CREATED_AT') or None,
-        'source': source,
-    })
 
 @app.route('/')
 def index():
@@ -1837,12 +1795,14 @@ def onshape_import():
                 )
                 empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
             else:
-                log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
-                part_exports = client.export_all_parts_as_dxfs(
-                    document_id, workspace_id, element_id,
-                    multilayer=multilayer_for_multi
-                )
-                empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
+                log("❌ Multi-part import requested, but no selected face IDs were provided. Refusing to export the whole Part Studio.")
+                return render_template('index.html',
+                                     error_message='No Onshape faces were selected. Select one large flat face per part, then import again.',
+                                     onshape_error={
+                                         'issue': 'multi_import_without_selected_faces',
+                                         'workaround': 'Select only the part faces you want before clicking Import from Onshape.'
+                                     },
+                                     from_onshape=True)
 
             if not part_exports:
                 return jsonify({
