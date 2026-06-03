@@ -148,11 +148,8 @@ function rotateEntityForPreview(entity, rotate90, partBounds) {
 }
 
 function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'auto') {
-    const ordered = parts
-        .map((part, index) => ({ part, index }))
-        .sort((a, b) => b.part.area - a.part.area);
-
-    const placements = new Array(parts.length);
+    const ordered = [...parts].sort((a, b) => b.area - a.area);
+    const placements = [];
     let xCursor = 0;
     let yCursor = 0;
     let rowHeight = 0;
@@ -168,7 +165,7 @@ function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'au
         return part.height < part.width;
     };
 
-    for (const { part, index } of ordered) {
+    for (const part of ordered) {
         const rotate90 = chooseRotate(part);
         const slotW = rotate90 ? part.height : part.width;
         const slotH = rotate90 ? part.width : part.height;
@@ -180,12 +177,10 @@ function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'au
         }
 
         if (yCursor + slotH > stockHeight) {
-            const partName = part.name || `Part ${index + 1}`;
-            throw new Error(`Not enough stock space for ${partName}: need ${slotW.toFixed(3)}" × ${slotH.toFixed(3)}" but only ${(stockWidth - xCursor).toFixed(3)}" × ${(stockHeight - yCursor).toFixed(3)}" remained.`);
+            throw new Error(`Not enough stock space for ${part.name}: need ${slotW.toFixed(3)}" × ${slotH.toFixed(3)}" but only ${(stockWidth - xCursor).toFixed(3)}" × ${(stockHeight - yCursor).toFixed(3)}" remained.`);
         }
 
-        placements[index] = {
-            partIndex: index,
+        placements.push({
             name: part.name,
             rotate90,
             x: xCursor,
@@ -193,7 +188,7 @@ function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'au
             width: slotW,
             height: slotH,
             part
-        };
+        });
 
         xCursor += slotW + gap;
         rowHeight = Math.max(rowHeight, slotH);
@@ -203,6 +198,8 @@ function packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation = 'au
 }
 
 function buildCompositePreviewGeometry(parts, placements, stockWidth, stockHeight) {
+    const safeStockWidth = Number.isFinite(stockWidth) && stockWidth > 0 ? stockWidth : 48.0;
+    const safeStockHeight = Number.isFinite(stockHeight) && stockHeight > 0 ? stockHeight : 48.0;
     const entities = [];
 
     const translateEntity = (entity, dx, dy, rotate90, partBounds) => {
@@ -222,29 +219,26 @@ function buildCompositePreviewGeometry(parts, placements, stockWidth, stockHeigh
 
     parts.forEach((part, idx) => {
         const placement = placements[idx];
-        if (!placement) {
-            throw new Error(`Missing placement for part ${idx + 1}`);
-        }
         part.geometry.entities.forEach(entity => {
             entities.push(translateEntity(entity, placement.x, placement.y, placement.rotate90, part.bounds));
         });
     });
 
     // Add the stock outline so the preview clearly shows the sheet boundary.
-    entities.push({ type: 'LINE', vertices: [{ x: 0, y: 0 }, { x: stockWidth, y: 0 }], layer: 'STOCK' });
-    entities.push({ type: 'LINE', vertices: [{ x: stockWidth, y: 0 }, { x: stockWidth, y: stockHeight }], layer: 'STOCK' });
-    entities.push({ type: 'LINE', vertices: [{ x: stockWidth, y: stockHeight }, { x: 0, y: stockHeight }], layer: 'STOCK' });
-    entities.push({ type: 'LINE', vertices: [{ x: 0, y: stockHeight }, { x: 0, y: 0 }], layer: 'STOCK' });
+    entities.push({ type: 'LINE', vertices: [{ x: 0, y: 0 }, { x: safeStockWidth, y: 0 }], layer: 'STOCK' });
+    entities.push({ type: 'LINE', vertices: [{ x: safeStockWidth, y: 0 }, { x: safeStockWidth, y: safeStockHeight }], layer: 'STOCK' });
+    entities.push({ type: 'LINE', vertices: [{ x: safeStockWidth, y: safeStockHeight }, { x: 0, y: safeStockHeight }], layer: 'STOCK' });
+    entities.push({ type: 'LINE', vertices: [{ x: 0, y: safeStockHeight }, { x: 0, y: 0 }], layer: 'STOCK' });
 
     const bounds = {
         minX: 0,
         minY: 0,
-        maxX: stockWidth,
-        maxY: stockHeight,
-        width: stockWidth,
-        height: stockHeight,
-        centerX: stockWidth / 2,
-        centerY: stockHeight / 2
+        maxX: safeStockWidth,
+        maxY: safeStockHeight,
+        width: safeStockWidth,
+        height: safeStockHeight,
+        centerX: safeStockWidth / 2,
+        centerY: safeStockHeight / 2
     };
 
     return { entities, bounds, transformedParts: placements };
@@ -1237,7 +1231,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const content = await file.text();
                 parseDxfManually(content);
                 parts.push({
-                    name: '',
+                    name: `Part ${parts.length + 1}`,
                     filename: file.name,
                     geometry: JSON.parse(JSON.stringify(dxfGeometry)),
                     bounds: { ...dxfBounds },
@@ -1254,7 +1248,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             try {
                 const placements = packShelfLayout(parts, stockWidth, stockHeight, gap, nestRotation);
-                const preview = buildCompositePreviewGeometry(parts, placements);
+                const preview = buildCompositePreviewGeometry(parts, placements, stockWidth, stockHeight);
 
                 dxfGeometry = {
                     entities: preview.entities,
