@@ -31,6 +31,7 @@
             background: var(--bg);
             font-size: 14px;
         }
+
         .panel-content {
             background: var(--surface);
             border-radius: 8px;
@@ -38,6 +39,7 @@
             box-shadow: 0 1px 3px rgba(0,0,0,0.1);
             border-top: 3px solid var(--primary);
         }
+
         .instruction {
             text-align: center;
             color: var(--text-dim);
@@ -45,15 +47,18 @@
             line-height: 1.5;
             font-size: 14px;
         }
+
         .instruction strong {
             font-weight: 600;
         }
+
         .button-group {
             display: flex;
             flex-direction: column;
             gap: 12px;
             margin-top: 16px;
         }
+
         button {
             padding: 12px 16px;
             border: none;
@@ -63,24 +68,30 @@
             cursor: pointer;
             transition: all 0.2s;
         }
+
         button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
+
         .btn-primary {
             background: var(--primary);
             color: #ffffff;
         }
+
         .btn-primary:hover:not(:disabled) {
             background: var(--primary-dark);
         }
+
         .btn-secondary {
             background: var(--secondary);
-            color: white;
+            color: var(--text);
         }
+
         .btn-secondary:hover:not(:disabled) {
-            background: #1a2a3a;
+            background: #d6d6d6;
         }
+
         .logo {
             text-align: center;
             margin-bottom: 16px;
@@ -92,13 +103,16 @@
             justify-content: center;
             gap: 8px;
         }
+
         .logo img {
             height: 24px;
             width: auto;
         }
+
         .logo .accent {
             color: var(--primary);
         }
+
         .mode-selector {
             margin: 16px 0;
             padding: 12px;
@@ -106,23 +120,27 @@
             border-radius: 6px;
             border-left: 3px solid var(--primary);
         }
+
         .mode-switch-container {
             display: flex;
             justify-content: center;
             gap: 12px;
             margin-bottom: 8px;
         }
+
         .mode-switch {
             position: relative;
             display: inline-block;
             width: 60px;
             height: 28px;
         }
+
         .mode-switch input {
             opacity: 0;
             width: 0;
             height: 0;
         }
+
         .mode-slider {
             position: absolute;
             cursor: pointer;
@@ -134,6 +152,7 @@
             transition: .3s;
             border-radius: 28px;
         }
+
         .mode-slider:before {
             position: absolute;
             content: "";
@@ -145,22 +164,27 @@
             transition: .3s;
             border-radius: 50%;
         }
+
         .mode-switch input:checked + .mode-slider {
             background-color: var(--primary);
         }
+
         .mode-switch input:checked + .mode-slider:before {
             transform: translateX(32px);
         }
+
         .mode-label-text {
             font-weight: 500;
             color: var(--text);
             font-size: 13px;
             line-height: 28px;
         }
+
         .mode-label-text.active {
             font-weight: 600;
             color: var(--text);
         }
+
         .mode-hint {
             margin-top: 4px;
             font-size: 12px;
@@ -180,12 +204,15 @@
         <div class="mode-selector">
             <div class="mode-switch-container">
                 <span class="mode-label-text active" id="mode2DLabel">2D</span>
+
                 <label class="mode-switch">
                     <input type="checkbox" id="multilayerMode">
                     <span class="mode-slider"></span>
                 </label>
+
                 <span class="mode-label-text" id="mode25DLabel">2.5D</span>
             </div>
+
             <div class="mode-hint" id="modeHint">
                 Any stock thickness works - cutting a flat pattern only
             </div>
@@ -195,7 +222,7 @@
             Select the top face of your part to manufacture
         </div>
 
-        <!-- Multi-part import: shown in 2.5D mode, no face selection needed -->
+        <!-- Multi-part import: shown in both 2D and 2.5D mode -->
         <div id="multiPartGroup" class="button-group" style="display: none;">
             <button id="importAllParts" class="btn-primary">
                 ⬆ Import all parts
@@ -206,6 +233,7 @@
             </div>
         </div>
 
+        <!-- Face selection controls -->
         <div id="buttonGroup" class="button-group" style="display: none;">
             <button id="selectAnotherFace" class="btn-secondary">
                 Select another face
@@ -223,6 +251,7 @@
             baseUrl: '{{ request.url_root.rstrip('/') }}'
         };
     </script>
+
     <script src="/static/onshape_panel.js"></script>
 </body>
 </html>
