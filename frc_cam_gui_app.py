@@ -140,17 +140,13 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
                     if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
         return '\n'.join(lines[start:end])
 
-    # Shelf pack largest parts first. This keeps V1 predictable and prevents
-    # small parts from fragmenting the first row before large plates are placed.
-    sorted_parts = sorted(parts, key=lambda p: (p.get('part_w', 0) * p.get('part_h', 0)), reverse=True)
-
     placements = []
     x_cursor = 0.0
     y_cursor = 0.0
     row_height = 0.0
     max_x_used = 0.0
 
-    for idx, part in enumerate(sorted_parts):
+    for idx, part in enumerate(parts):
         do_rotate = choose_rotation(part)
         if do_rotate:
             slot_w, slot_h = part['part_h'], part['part_w']
@@ -558,6 +554,31 @@ def generate_onshape_filename(doc_name, part_name):
     # Last resort: timestamp (server's local time)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return f"Onshape_Part_{timestamp}"
+
+def get_deployed_commit_sha():
+    '''Return the deployed commit SHA if available.'''
+    for env_name in ("VERCEL_GIT_COMMIT_SHA", "GITHUB_SHA", "COMMIT_SHA"):
+        sha = os.environ.get(env_name)
+        if sha:
+            sha = sha.strip()
+            if sha:
+                return sha
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        sha = result.stdout.strip()
+        if sha:
+            return sha
+    except Exception:
+        pass
+
+    return None
 
 # ============================================================================
 # Routes
@@ -1545,6 +1566,18 @@ def set_machine():
         log(f"Error setting machine: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/build-info')
+@limiter.limit("30 per minute")
+def api_build_info():
+    '''Return the commit SHA of the currently deployed build.'''
+    sha = get_deployed_commit_sha()
+    return jsonify({
+        'commitSha': sha,
+        'shortSha': sha[:7] if sha else None,
+        'deployedAt': os.environ.get('VERCEL_DEPLOYMENT_CREATED_AT') or os.environ.get('BUILD_TIME'),
+        'platform': 'vercel' if os.environ.get('VERCEL') == '1' else 'local',
+    })
+
 @app.route('/debug/session')
 @limiter.limit("30 per minute")
 def debug_session():
@@ -1795,14 +1828,12 @@ def onshape_import():
                 )
                 empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
             else:
-                log("❌ Multi-part import requested, but no selected face IDs were provided. Refusing to export the whole Part Studio.")
-                return render_template('index.html',
-                                     error_message='No Onshape faces were selected. Select one large flat face per part, then import again.',
-                                     onshape_error={
-                                         'issue': 'multi_import_without_selected_faces',
-                                         'workaround': 'Select only the part faces you want before clicking Import from Onshape.'
-                                     },
-                                     from_onshape=True)
+                log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+                part_exports = client.export_all_parts_as_dxfs(
+                    document_id, workspace_id, element_id,
+                    multilayer=multilayer_for_multi
+                )
+                empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
 
             if not part_exports:
                 return jsonify({
