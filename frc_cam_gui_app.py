@@ -1819,21 +1819,19 @@ def onshape_import():
             selected_face_ids_raw = raw_params.get('faceIds', '').strip()
             selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
 
-            if selected_face_ids:
-                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
-                part_exports = client.export_selected_faces_as_dxfs(
-                    document_id, workspace_id, element_id,
-                    selected_face_ids,
-                    multilayer=multilayer_for_multi
-                )
-                empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
-            else:
-                log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
-                part_exports = client.export_all_parts_as_dxfs(
-                    document_id, workspace_id, element_id,
-                    multilayer=multilayer_for_multi
-                )
-                empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
+            if not selected_face_ids:
+                return jsonify({
+                    'error': 'No Onshape faces selected for multi-part import',
+                    'message': 'Select one flat face per part before importing. BionicsCAM will not export the entire Part Studio automatically.'
+                }), 400
+
+            log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+            part_exports = client.export_selected_faces_as_dxfs(
+                document_id, workspace_id, element_id,
+                selected_face_ids,
+                multilayer=multilayer_for_multi
+            )
+            empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
 
             if not part_exports:
                 return jsonify({
