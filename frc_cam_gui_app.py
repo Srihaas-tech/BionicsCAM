@@ -117,7 +117,14 @@ def process_standard_dxf_file(
 
 
 def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, timestamp_str):
-    """Place multiple independently generated parts side-by-side on the sheet."""
+    """Place multiple independently generated parts side-by-side on the sheet.
+
+    V1 shelf packing:
+    - sort by largest area first
+    - place left-to-right until we run out of room
+    - then start a new row
+    - rotate 90° only when requested or when it improves fit in auto mode
+    """
     if not parts:
         raise ValueError('No parts to combine')
 
@@ -126,7 +133,19 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
             return True
         if nest_rotation == '0':
             return False
-        # Auto: rotate if it makes the part narrower for side-by-side layout
+
+        fits_0 = part['part_w'] <= stock_x and part['part_h'] <= stock_y
+        fits_90 = part['part_h'] <= stock_x and part['part_w'] <= stock_y
+
+        if fits_90 and not fits_0:
+            return True
+        if fits_0 and not fits_90:
+            return False
+        if fits_0 and fits_90:
+            # Prefer the orientation that uses less width so the shelf fills left-to-right better.
+            return part['part_h'] < part['part_w']
+
+        # Neither orientation fits cleanly; keep the narrower orientation for a best-effort preview.
         return part['part_h'] < part['part_w']
 
     def extract_toolpath(gcode_str):
@@ -140,13 +159,22 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
                     if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
         return '\n'.join(lines[start:end])
 
+    ordered_parts = sorted(
+        parts,
+        key=lambda part: (part['part_w'] * part['part_h']),
+        reverse=True,
+    )
+
     placements = []
     x_cursor = 0.0
     y_cursor = 0.0
     row_height = 0.0
     max_x_used = 0.0
+    row_count = 1 if ordered_parts else 0
+    current_row_count = 0
+    max_cols = 0
 
-    for idx, part in enumerate(parts):
+    for idx, part in enumerate(ordered_parts):
         do_rotate = choose_rotation(part)
         if do_rotate:
             slot_w, slot_h = part['part_h'], part['part_w']
@@ -158,18 +186,17 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
             rot_label = '0°'
 
         if x_cursor > 0 and (x_cursor + slot_w) > stock_x:
+            max_cols = max(max_cols, current_row_count)
+            current_row_count = 0
             x_cursor = 0.0
             y_cursor += row_height + gap
             row_height = 0.0
-
-        if (x_cursor + slot_w) > stock_x and x_cursor == 0.0 and idx == 0:
-            # First part is simply too large for the stock; let it through but warn later.
-            pass
+            row_count += 1
 
         if (y_cursor + slot_h) > stock_y:
             raise ValueError(
-                f'Not enough stock space for part {idx + 1}: needed {(slot_w):.3f}\" x {(slot_h):.3f}\", '
-                f'but only {(stock_x - x_cursor):.3f}\" x {(stock_y - y_cursor):.3f}\" remained.'
+                f'Not enough stock space for part {idx + 1}: needed {slot_w:.3f}" x {slot_h:.3f}", '
+                f'but only {(stock_x - x_cursor):.3f}" x {(stock_y - y_cursor):.3f}" remained.'
             )
 
         placements.append({
@@ -183,9 +210,12 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
             'rotation_label': rot_label,
         })
 
+        current_row_count += 1
         max_x_used = max(max_x_used, x_cursor + slot_w)
         x_cursor += slot_w + gap
         row_height = max(row_height, slot_h)
+
+    max_cols = max(max_cols, current_row_count)
 
     combined_blocks = []
     for placement in placements:
@@ -199,7 +229,8 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
             combined_blocks.append(extract_toolpath(shifted))
 
     combined_gcode = '\n'.join(combined_blocks)
-    return combined_gcode, placements, max_x_used, y_cursor + row_height
+    return combined_gcode, placements, max_x_used, y_cursor + row_height, row_count, max_cols
+
 import atexit
 import time
 import threading
@@ -836,7 +867,7 @@ def process_file():
                         gap = tool_diameter
 
                         try:
-                            combined_gcode, placements, used_w, used_h = combine_multi_dxf_results(
+                            combined_gcode, placements, used_w, used_h, row_count, max_cols = combine_multi_dxf_results(
                                 standard_parts,
                                 stock_x=stock_x,
                                 stock_y=stock_y,
@@ -853,7 +884,7 @@ def process_file():
                         else:
                             result.gcode = combined_gcode
                             combined_base = re.sub(r'[^\w\-]+', '_', Path(standard_parts[0]['base_name']).stem).strip('_') or 'Combined_DXF'
-                            safe_timestamp = timestamp_str.replace(' ', '_').replace(':', '-').replace('/', '-') if timestamp_str else datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                            safe_timestamp = timestamp_str.replace(' ', '_').replace(':', '-').replace('/', '-') if timestamp_str else datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                             result.filename = f"{combined_base}_combined_{safe_timestamp}.nc"
                             combined_warnings = []
                             for part in standard_parts:
@@ -862,8 +893,8 @@ def process_file():
                             result.stats['quantity'] = len(standard_parts)
                             result.stats['multi_dxf'] = True
                             result.stats['multi_dxf_parts'] = [part['source_name'] for part in standard_parts]
-                            result.stats['nesting_cols'] = len(placements)
-                            result.stats['nesting_rows'] = 1 if placements else 0
+                            result.stats['nesting_cols'] = max_cols
+                            result.stats['nesting_rows'] = row_count
                             result.stats['nesting_rotation'] = nest_rotation if nest_rotation != 'auto' else 'mixed'
                             result.stats['combined_width'] = used_w
                             result.stats['combined_height'] = used_h
