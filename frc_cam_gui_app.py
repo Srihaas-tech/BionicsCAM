@@ -1830,12 +1830,10 @@ def onshape_import():
                 )
                 empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
             else:
-                log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
-                part_exports = client.export_all_parts_as_dxfs(
-                    document_id, workspace_id, element_id,
-                    multilayer=multilayer_for_multi
-                )
-                empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
+                log("❌ Multi-part import requested but no selected face IDs were provided; refusing to export the entire Part Studio")
+                return jsonify({
+                    'error': 'No Onshape faces were selected for multi-part import. Select one flat face per part, then import again.'
+                }), 400
 
             if not part_exports:
                 return jsonify({
