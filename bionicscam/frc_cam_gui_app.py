@@ -141,49 +141,10 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
         return '\n'.join(lines[start:end])
 
     placements = []
+    x_cursor = 0.0
+    y_cursor = 0.0
+    row_height = 0.0
     max_x_used = 0.0
-    EPS = 1e-6
-
-    def overlaps_existing(candidate, existing):
-        separated = (
-            candidate['x'] + candidate['slot_w'] + gap <= existing['x'] + EPS or
-            candidate['x'] >= existing['x'] + existing['slot_w'] + gap - EPS or
-            candidate['y'] + candidate['slot_h'] + gap <= existing['y'] + EPS or
-            candidate['y'] >= existing['y'] + existing['slot_h'] + gap - EPS
-        )
-        return not separated
-
-    def find_bottom_left_slot(slot_w, slot_h):
-        candidate_xs = {0.0}
-        candidate_ys = {0.0}
-        for placed in placements:
-            candidate_xs.add(placed['x'])
-            candidate_xs.add(placed['x'] + placed['slot_w'] + gap)
-            candidate_ys.add(placed['y'])
-            candidate_ys.add(placed['y'] + placed['slot_h'] + gap)
-
-        best = None
-        for candidate_y in sorted(candidate_ys):
-            for candidate_x in sorted(candidate_xs):
-                candidate = {
-                    'x': candidate_x,
-                    'y': candidate_y,
-                    'slot_w': slot_w,
-                    'slot_h': slot_h,
-                }
-                if candidate_x + slot_w > stock_x + EPS:
-                    continue
-                if candidate_y + slot_h > stock_y + EPS:
-                    continue
-                if any(overlaps_existing(candidate, placed) for placed in placements):
-                    continue
-                if (
-                    best is None or
-                    candidate_y < best['y'] - EPS or
-                    (abs(candidate_y - best['y']) <= EPS and candidate_x < best['x'])
-                ):
-                    best = candidate
-        return best
 
     for idx, part in enumerate(parts):
         do_rotate = choose_rotation(part)
@@ -196,25 +157,35 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
             gcode = part['result'].gcode
             rot_label = '0°'
 
-        slot = find_bottom_left_slot(slot_w, slot_h)
-        if slot is None:
+        if x_cursor > 0 and (x_cursor + slot_w) > stock_x:
+            x_cursor = 0.0
+            y_cursor += row_height + gap
+            row_height = 0.0
+
+        if (x_cursor + slot_w) > stock_x and x_cursor == 0.0 and idx == 0:
+            # First part is simply too large for the stock; let it through but warn later.
+            pass
+
+        if (y_cursor + slot_h) > stock_y:
             raise ValueError(
-                f'Not enough stock space for part {idx + 1}: needed {slot_w:.3f}" x {slot_h:.3f}" '
-                f'with {gap:.3f}" clearance on a {stock_x:.3f}" x {stock_y:.3f}" sheet.'
+                f'Not enough stock space for part {idx + 1}: needed {(slot_w):.3f}\" x {(slot_h):.3f}\", '
+                f'but only {(stock_x - x_cursor):.3f}\" x {(stock_y - y_cursor):.3f}\" remained.'
             )
 
-        placement = {
+        placements.append({
             'index': idx,
             'source_name': part['source_name'],
             'gcode': gcode,
-            'x': slot['x'],
-            'y': slot['y'],
+            'x': x_cursor,
+            'y': y_cursor,
             'slot_w': slot_w,
             'slot_h': slot_h,
             'rotation_label': rot_label,
-        }
-        placements.append(placement)
-        max_x_used = max(max_x_used, placement['x'] + slot_w)
+        })
+
+        max_x_used = max(max_x_used, x_cursor + slot_w)
+        x_cursor += slot_w + gap
+        row_height = max(row_height, slot_h)
 
     combined_blocks = []
     for placement in placements:
@@ -228,8 +199,7 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
             combined_blocks.append(extract_toolpath(shifted))
 
     combined_gcode = '\n'.join(combined_blocks)
-    max_y_used = max((p['y'] + p['slot_h'] for p in placements), default=0.0)
-    return combined_gcode, placements, max_x_used, max_y_used
+    return combined_gcode, placements, max_x_used, y_cursor + row_height
 import atexit
 import time
 import threading
@@ -237,7 +207,7 @@ from datetime import datetime
 from urllib.parse import urlencode
 import ezdxf
 import logging
-from bionicscam import metrics
+import metrics
 
 # Configure logging for Vercel
 logging.basicConfig(
@@ -263,7 +233,7 @@ def log(*args, **kwargs):
 
 # Import Google Drive integration (optional - will work without it)
 try:
-    from bionicscam.integrations.google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
+    from google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
     GOOGLE_DRIVE_AVAILABLE = True
 except ImportError:
     GOOGLE_DRIVE_AVAILABLE = False
@@ -272,7 +242,7 @@ except ImportError:
 
 # Import authentication (optional - will work without it)
 try:
-    from bionicscam.integrations.penguincam_auth import init_auth
+    from penguincam_auth import init_auth
     AUTH_AVAILABLE = True
 except ImportError:
     AUTH_AVAILABLE = False
@@ -280,17 +250,17 @@ except ImportError:
 
 # Import Onshape integration (optional - will work without it)
 try:
-    from bionicscam.integrations.onshape_integration import get_onshape_client, session_manager
+    from onshape_integration import get_onshape_client, session_manager
     ONSHAPE_AVAILABLE = True
 except ImportError:
     ONSHAPE_AVAILABLE = False
     log("⚠️  Onshape integration not available")
 
 # Import postprocessor directly (for API calls instead of subprocess)
-from bionicscam.frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
+from frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
 
 # Import team config management
-from bionicscam.team_config import TeamConfig
+from team_config import TeamConfig
 
 # ============================================================================
 # File Token Manager - Secure file access with random tokens
@@ -402,13 +372,7 @@ def cleanup_worker():
 
 # Initialize file token manager
 file_token_manager = FileTokenManager()
-REPO_ROOT = Path(__file__).resolve().parents[1]
-app = Flask(
-    __name__,
-    template_folder=str(REPO_ROOT / 'web' / 'templates'),
-    static_folder=str(REPO_ROOT / 'web' / 'static'),
-    static_url_path='/static'
-)
+app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
 # Disable Flask/Werkzeug request logging in production (Vercel)
@@ -818,6 +782,10 @@ def process_file():
                 standard_parts = []
 
                 if len(uploaded_files) > 1:
+                    if quantity > 1:
+                        log("⚠️ Multiple DXFs selected; quantity is ignored and each DXF is placed once.")
+                        quantity = 1
+
                     multi_ok = True
                     # Seek all streams back to start — uploaded_files[0] (== file) was
                     # already consumed by the unconditional file.save() above.
@@ -867,18 +835,9 @@ def process_file():
                         stock_y = standard_parts[0]['pp'].config.machine_y_max
                         gap = tool_diameter
 
-                        expanded_parts = []
-                        for copy_num in range(quantity):
-                            for part in standard_parts:
-                                expanded_part = part.copy()
-                                if quantity > 1:
-                                    expanded_part['source_name'] = f"{part['source_name']} copy {copy_num + 1}"
-                                    expanded_part['base_name'] = f"{part['base_name']}_copy_{copy_num + 1}"
-                                expanded_parts.append(expanded_part)
-
                         try:
                             combined_gcode, placements, used_w, used_h = combine_multi_dxf_results(
-                                expanded_parts,
+                                standard_parts,
                                 stock_x=stock_x,
                                 stock_y=stock_y,
                                 gap=gap,
@@ -900,10 +859,9 @@ def process_file():
                             for part in standard_parts:
                                 combined_warnings.extend(part['result'].warnings)
                             result.warnings = combined_warnings
-                            result.stats['quantity'] = len(expanded_parts)
-                            result.stats['copies_per_dxf'] = quantity
+                            result.stats['quantity'] = len(standard_parts)
                             result.stats['multi_dxf'] = True
-                            result.stats['multi_dxf_parts'] = [part['source_name'] for part in expanded_parts]
+                            result.stats['multi_dxf_parts'] = [part['source_name'] for part in standard_parts]
                             result.stats['nesting_cols'] = len(placements)
                             result.stats['nesting_rows'] = 1 if placements else 0
                             result.stats['nesting_rotation'] = nest_rotation if nest_rotation != 'auto' else 'mixed'
@@ -1827,12 +1785,7 @@ def onshape_import():
             selected_body_ids = [bid.strip() for bid in selected_body_ids_raw.split(',') if bid.strip()]
 
             if selected_face_ids or selected_body_ids:
-                log(
-                    f"🗂️  Selected multi-part import requested – exporting "
-                    f"{len(selected_face_ids)} selected face id(s), "
-                    f"{len(selected_body_ids)} selected body id(s) as separate "
-                    f"{'2.5D' if multilayer_for_multi else '2D'} DXFs"
-                )
+                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s), {len(selected_body_ids)} selected body id(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
                 part_exports = client.export_selected_faces_as_dxfs(
                     document_id, workspace_id, element_id,
                     selected_face_ids,
@@ -1888,7 +1841,6 @@ def onshape_import():
             return render_template('index.html',
                                  dxf_file='', dxf_content_inline=None,
                                  dxf_files_inline=dxf_files_inline,
-                                 onshape_multilayer=multilayer_for_multi,
                                  from_onshape=True, document_id=document_id,
                                  face_id='', suggested_filename='Onshape_selected_import' if selected_face_ids else 'Onshape_multi_import', detected_thickness=None,
                                  user_name=session.get('user_name'), team_name=session.get('team_name'),
@@ -2260,7 +2212,6 @@ def onshape_import():
         return render_template('index.html',
                              dxf_file=dxf_token,  # Pass token instead of filename
                              dxf_content_inline=dxf_content_inline,  # Inline DXF for Vercel
-                             onshape_multilayer=multilayer,
                              from_onshape=True,
                              document_id=document_id,
                              face_id=face_id,
