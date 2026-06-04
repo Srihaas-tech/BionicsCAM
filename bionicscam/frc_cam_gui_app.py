@@ -22,8 +22,6 @@ import secrets
 import re
 import uuid
 
-AUTO_NEST_CLEARANCE_INCHES = 0.125  # 1/8 inch clearance between auto-nested parts
-
 # Upstash Redis for job history
 try:
     from upstash_redis import Redis as UpstashRedis
@@ -142,8 +140,6 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
                     if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
         return '\n'.join(lines[start:end])
 
-    parts = sorted(parts, key=lambda p: max(float(p.get('part_w', 0) or 0), float(p.get('part_h', 0) or 0)) * min(float(p.get('part_w', 0) or 0), float(p.get('part_h', 0) or 0)), reverse=True)
-
     placements = []
     x_cursor = 0.0
     y_cursor = 0.0
@@ -211,7 +207,7 @@ from datetime import datetime
 from urllib.parse import urlencode
 import ezdxf
 import logging
-from bionicscam import metrics
+import metrics
 
 # Configure logging for Vercel
 logging.basicConfig(
@@ -237,7 +233,7 @@ def log(*args, **kwargs):
 
 # Import Google Drive integration (optional - will work without it)
 try:
-    from bionicscam.integrations.google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
+    from google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
     GOOGLE_DRIVE_AVAILABLE = True
 except ImportError:
     GOOGLE_DRIVE_AVAILABLE = False
@@ -246,7 +242,7 @@ except ImportError:
 
 # Import authentication (optional - will work without it)
 try:
-    from bionicscam.integrations.penguincam_auth import init_auth
+    from penguincam_auth import init_auth
     AUTH_AVAILABLE = True
 except ImportError:
     AUTH_AVAILABLE = False
@@ -254,17 +250,17 @@ except ImportError:
 
 # Import Onshape integration (optional - will work without it)
 try:
-    from bionicscam.integrations.onshape_integration import get_onshape_client, session_manager
+    from onshape_integration import get_onshape_client, session_manager
     ONSHAPE_AVAILABLE = True
 except ImportError:
     ONSHAPE_AVAILABLE = False
     log("⚠️  Onshape integration not available")
 
 # Import postprocessor directly (for API calls instead of subprocess)
-from bionicscam.frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
+from frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
 
 # Import team config management
-from bionicscam.team_config import TeamConfig
+from team_config import TeamConfig
 
 # ============================================================================
 # File Token Manager - Secure file access with random tokens
@@ -376,7 +372,7 @@ def cleanup_worker():
 
 # Initialize file token manager
 file_token_manager = FileTokenManager()
-app = Flask(__name__, template_folder='../web/templates', static_folder='../web/static')
+app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
 # Disable Flask/Werkzeug request logging in production (Vercel)
@@ -558,31 +554,6 @@ def generate_onshape_filename(doc_name, part_name):
     # Last resort: timestamp (server's local time)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return f"Onshape_Part_{timestamp}"
-
-def get_deployed_commit_sha():
-    '''Return the deployed commit SHA if available.'''
-    for env_name in ("VERCEL_GIT_COMMIT_SHA", "GITHUB_SHA", "COMMIT_SHA"):
-        sha = os.environ.get(env_name)
-        if sha:
-            sha = sha.strip()
-            if sha:
-                return sha
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=SCRIPT_DIR,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        sha = result.stdout.strip()
-        if sha:
-            return sha
-    except Exception:
-        pass
-
-    return None
 
 # ============================================================================
 # Routes
@@ -862,7 +833,7 @@ def process_file():
                         result = standard_parts[0]['result']
                         stock_x = standard_parts[0]['pp'].config.machine_x_max
                         stock_y = standard_parts[0]['pp'].config.machine_y_max
-                        gap = AUTO_NEST_CLEARANCE_INCHES  # Small clearance between auto-nested parts
+                        gap = tool_diameter
 
                         try:
                             combined_gcode, placements, used_w, used_h = combine_multi_dxf_results(
@@ -1570,18 +1541,6 @@ def set_machine():
         log(f"Error setting machine: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/build-info')
-@limiter.limit("30 per minute")
-def api_build_info():
-    '''Return the commit SHA of the currently deployed build.'''
-    sha = get_deployed_commit_sha()
-    return jsonify({
-        'commitSha': sha,
-        'shortSha': sha[:7] if sha else None,
-        'deployedAt': os.environ.get('VERCEL_DEPLOYMENT_CREATED_AT') or os.environ.get('BUILD_TIME'),
-        'platform': 'vercel' if os.environ.get('VERCEL') == '1' else 'local',
-    })
-
 @app.route('/debug/session')
 @limiter.limit("30 per minute")
 def debug_session():
@@ -1832,10 +1791,12 @@ def onshape_import():
                 )
                 empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
             else:
-                log("❌ Multi-part import requested but no selected face IDs were provided; refusing to export the entire Part Studio")
-                return jsonify({
-                    'error': 'No Onshape faces were selected for multi-part import. Select one flat face per part, then import again.'
-                }), 400
+                log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+                part_exports = client.export_all_parts_as_dxfs(
+                    document_id, workspace_id, element_id,
+                    multilayer=multilayer_for_multi
+                )
+                empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
 
             if not part_exports:
                 return jsonify({
@@ -1873,6 +1834,7 @@ def onshape_import():
             return render_template('index.html',
                                  dxf_file='', dxf_content_inline=None,
                                  dxf_files_inline=dxf_files_inline,
+                                 onshape_multilayer=multilayer_for_multi,
                                  from_onshape=True, document_id=document_id,
                                  face_id='', suggested_filename='Onshape_selected_import' if selected_face_ids else 'Onshape_multi_import', detected_thickness=None,
                                  user_name=session.get('user_name'), team_name=session.get('team_name'),
@@ -2244,6 +2206,7 @@ def onshape_import():
         return render_template('index.html',
                              dxf_file=dxf_token,  # Pass token instead of filename
                              dxf_content_inline=dxf_content_inline,  # Inline DXF for Vercel
+                             onshape_multilayer=multilayer,
                              from_onshape=True,
                              document_id=document_id,
                              face_id=face_id,
