@@ -201,63 +201,18 @@
         return ids;
     }
 
-    function addUniqueId(ids, value) {
-        if (value === null || value === undefined) {
-            return;
-        }
-
-        const text = String(value).trim();
-        if (text && !ids.includes(text)) {
-            ids.push(text);
-        }
-    }
-
-    function walkSelectionRecord(value, visitor, depth = 0) {
-        if (depth > 8 || value === null || value === undefined) {
-            return;
-        }
-
-        if (Array.isArray(value)) {
-            value.forEach(item => walkSelectionRecord(item, visitor, depth + 1));
-            return;
-        }
-
-        if (typeof value === 'object') {
-            for (const [key, child] of Object.entries(value)) {
-                visitor(key, child);
-                walkSelectionRecord(child, visitor, depth + 1);
-            }
-        }
-    }
-
     function getSelectedBodyIds() {
         const ids = [];
-        const bodyKeyPattern = /(body|part|occurrence|instance)/i;
 
         for (const sel of selectedSelections) {
-            addUniqueId(ids, sel.bodyId);
-            addUniqueId(ids, sel.partId);
-            addUniqueId(ids, sel.occurrenceId);
-            addUniqueId(ids, sel.instanceId);
+            const id = sel.bodyId || sel.partId || sel.occurrenceId;
 
-            walkSelectionRecord(sel, (key, value) => {
-                if (bodyKeyPattern.test(key) && (typeof value === 'string' || typeof value === 'number')) {
-                    addUniqueId(ids, value);
-                }
-            });
+            if (id && !ids.includes(id)) {
+                ids.push(id);
+            }
         }
 
         return ids;
-    }
-
-    function getSelectedSelectionRecords() {
-        return selectedSelections.map(sel => {
-            try {
-                return JSON.parse(JSON.stringify(sel));
-            } catch (error) {
-                return { stringValue: String(sel) };
-            }
-        });
     }
 
     function handleGenericSelection(data) {
@@ -367,15 +322,15 @@
             params.append('selectedOnly', 'true');
         }
 
-        if (selectedFaceIds.length >= 1 || selectedBodyIds.length >= 1) {
-            const selectedRecords = getSelectedSelectionRecords();
-            params.append('selectionRecords', JSON.stringify(selectedRecords));
-            params.append('selectedOnly', 'true');
+        // Keep the exact Onshape selection payload. It includes the workspace
+        // microversion where short face IDs like JPK/JjG are valid.
+        if (selectedSelections.length >= 1) {
+            params.append('selectedRecords', JSON.stringify(selectedSelections));
         }
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
 
-        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds, 'selectedBodyIds=', selectedBodyIds, 'selectionRecords=', getSelectedSelectionRecords());
+        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds, 'selectedBodyIds=', selectedBodyIds);
 
         window.open(url, '_blank');
     }
