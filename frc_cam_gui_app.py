@@ -3,6 +3,9 @@
 BionicsCam - FRC Team 4909 CAM Tool
 A Flask-based web interface for generating G-code from DXF files
 """
+"""
+This is a test commit
+"""
 from flask import Flask, render_template, request, jsonify, send_file, session, send_from_directory, redirect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -18,8 +21,6 @@ import json
 import secrets
 import re
 import uuid
-
-AUTO_NEST_CLEARANCE_INCHES = 0.125  # 1/8 inch clearance between auto-nested parts
 
 # Upstash Redis for job history
 try:
@@ -138,8 +139,6 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
         end = next((i for i, l in enumerate(lines)
                     if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
         return '\n'.join(lines[start:end])
-
-    parts = sorted(parts, key=lambda p: max(float(p.get('part_w', 0) or 0), float(p.get('part_h', 0) or 0)) * min(float(p.get('part_w', 0) or 0), float(p.get('part_h', 0) or 0)), reverse=True)
 
     placements = []
     x_cursor = 0.0
@@ -556,31 +555,6 @@ def generate_onshape_filename(doc_name, part_name):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return f"Onshape_Part_{timestamp}"
 
-def get_deployed_commit_sha():
-    '''Return the deployed commit SHA if available.'''
-    for env_name in ("VERCEL_GIT_COMMIT_SHA", "GITHUB_SHA", "COMMIT_SHA"):
-        sha = os.environ.get(env_name)
-        if sha:
-            sha = sha.strip()
-            if sha:
-                return sha
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=SCRIPT_DIR,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        sha = result.stdout.strip()
-        if sha:
-            return sha
-    except Exception:
-        pass
-
-    return None
-
 # ============================================================================
 # Routes
 # ============================================================================
@@ -859,7 +833,7 @@ def process_file():
                         result = standard_parts[0]['result']
                         stock_x = standard_parts[0]['pp'].config.machine_x_max
                         stock_y = standard_parts[0]['pp'].config.machine_y_max
-                        gap = AUTO_NEST_CLEARANCE_INCHES  # Small clearance between auto-nested parts
+                        gap = tool_diameter
 
                         try:
                             combined_gcode, placements, used_w, used_h = combine_multi_dxf_results(
@@ -1567,18 +1541,6 @@ def set_machine():
         log(f"Error setting machine: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/build-info')
-@limiter.limit("30 per minute")
-def api_build_info():
-    '''Return the commit SHA of the currently deployed build.'''
-    sha = get_deployed_commit_sha()
-    return jsonify({
-        'commitSha': sha,
-        'shortSha': sha[:7] if sha else None,
-        'deployedAt': os.environ.get('VERCEL_DEPLOYMENT_CREATED_AT') or os.environ.get('BUILD_TIME'),
-        'platform': 'vercel' if os.environ.get('VERCEL') == '1' else 'local',
-    })
-
 @app.route('/debug/session')
 @limiter.limit("30 per minute")
 def debug_session():
@@ -1818,61 +1780,35 @@ def onshape_import():
         if multi_parts:
             multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
             selected_face_ids_raw = raw_params.get('faceIds', '').strip()
-            selected_face_ids_all = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
-
-            # Separate real face IDs from body:XYZ sentinels the panel sends
-            # when Onshape only gave it a short body ID (<=4 chars).
-            selected_face_ids = [fid for fid in selected_face_ids_all if not fid.startswith('body:')]
-            body_id_hints = [fid[len('body:'):] for fid in selected_face_ids_all if fid.startswith('body:')]
-
-            # Also accept an explicit partIds param as body ID hints
-            part_ids_raw = raw_params.get('partIds', '').strip()
-            if part_ids_raw:
-                for pid in part_ids_raw.split(','):
-                    pid = pid.strip()
-                    if pid and pid not in body_id_hints:
-                        body_id_hints.append(pid)
-
-            raw_selections = raw_params.get('rawSelections', '').strip()
-            if raw_selections:
-                log(f"🔍 raw Onshape selections from panel: {raw_selections[:1000]}")
-            log(f"🔍 face IDs from panel: {selected_face_ids}, body ID hints: {body_id_hints}")
-
-            # If no real face IDs but we have body IDs, auto-select the top
-            # face of each body so the export can proceed normally.
-            if not selected_face_ids and body_id_hints:
-                log("⚠️  No face IDs – resolving top faces from body ID hints")
-                faces_data_hint = client.list_faces(document_id, workspace_id, element_id)
-                for bid in body_id_hints:
-                    fid, _, _, _ = client.auto_select_top_face(
-                        document_id, workspace_id, element_id,
-                        body_id=bid,
-                        cached_faces_data=faces_data_hint
-                    )
-                    if fid:
-                        selected_face_ids.append(fid)
-                        log(f"✅ Resolved body {bid} → face {fid}")
-                    else:
-                        log(f"⚠️  Could not resolve top face for body {bid}")
+            selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
+            selected_records = []
+            selected_records_raw = raw_params.get('selectionRecords', '').strip()
+            if selected_records_raw:
+                try:
+                    parsed_records = json.loads(selected_records_raw)
+                    if isinstance(parsed_records, list):
+                        selected_records = parsed_records
+                except Exception as parse_selection_error:
+                    log(f"⚠️  Could not parse Onshape selectionRecords: {parse_selection_error}")
 
             if selected_face_ids:
                 log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+                if selected_records:
+                    log(f"🧾 Received {len(selected_records)} raw Onshape selection record(s)")
                 part_exports = client.export_selected_faces_as_dxfs(
                     document_id, workspace_id, element_id,
                     selected_face_ids,
-                    multilayer=multilayer_for_multi
+                    multilayer=multilayer_for_multi,
+                    selected_records=selected_records
                 )
                 empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
             else:
-                log("❌ Multi-part import requested but no selected face IDs were provided; refusing to export the entire Part Studio")
-                return jsonify({
-                    'error': 'No Onshape faces were selected for multi-part import. Select one flat face per part, then import again.',
-                    'debug': {
-                        'received_faceIds': selected_face_ids_raw,
-                        'received_partIds': part_ids_raw,
-                        'received_rawSelections_count': 1 if raw_selections else 0
-                    }
-                }), 400
+                log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+                part_exports = client.export_all_parts_as_dxfs(
+                    document_id, workspace_id, element_id,
+                    multilayer=multilayer_for_multi
+                )
+                empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
 
             if not part_exports:
                 return jsonify({
