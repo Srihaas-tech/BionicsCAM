@@ -818,10 +818,6 @@ def process_file():
                 standard_parts = []
 
                 if len(uploaded_files) > 1:
-                    if quantity > 1:
-                        log("⚠️ Multiple DXFs selected; quantity is ignored and each DXF is placed once.")
-                        quantity = 1
-
                     multi_ok = True
                     # Seek all streams back to start — uploaded_files[0] (== file) was
                     # already consumed by the unconditional file.save() above.
@@ -871,9 +867,18 @@ def process_file():
                         stock_y = standard_parts[0]['pp'].config.machine_y_max
                         gap = tool_diameter
 
+                        expanded_parts = []
+                        for copy_num in range(quantity):
+                            for part in standard_parts:
+                                expanded_part = part.copy()
+                                if quantity > 1:
+                                    expanded_part['source_name'] = f"{part['source_name']} copy {copy_num + 1}"
+                                    expanded_part['base_name'] = f"{part['base_name']}_copy_{copy_num + 1}"
+                                expanded_parts.append(expanded_part)
+
                         try:
                             combined_gcode, placements, used_w, used_h = combine_multi_dxf_results(
-                                standard_parts,
+                                expanded_parts,
                                 stock_x=stock_x,
                                 stock_y=stock_y,
                                 gap=gap,
@@ -895,9 +900,10 @@ def process_file():
                             for part in standard_parts:
                                 combined_warnings.extend(part['result'].warnings)
                             result.warnings = combined_warnings
-                            result.stats['quantity'] = len(standard_parts)
+                            result.stats['quantity'] = len(expanded_parts)
+                            result.stats['copies_per_dxf'] = quantity
                             result.stats['multi_dxf'] = True
-                            result.stats['multi_dxf_parts'] = [part['source_name'] for part in standard_parts]
+                            result.stats['multi_dxf_parts'] = [part['source_name'] for part in expanded_parts]
                             result.stats['nesting_cols'] = len(placements)
                             result.stats['nesting_rows'] = 1 if placements else 0
                             result.stats['nesting_rotation'] = nest_rotation if nest_rotation != 'auto' else 'mixed'
