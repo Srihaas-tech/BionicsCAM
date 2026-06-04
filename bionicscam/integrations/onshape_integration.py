@@ -1976,6 +1976,7 @@ class OnshapeClient:
 
     def export_selected_faces_as_dxfs(self, document_id, workspace_id, element_id,
                                       selected_face_ids, selected_body_ids=None,
+                                      selection_metadata=None,
                                       multilayer=True):
         """
         Export only user-selected Onshape faces as separate DXFs.
@@ -1989,10 +1990,63 @@ class OnshapeClient:
         log(f"MULTI-PART EXPORT: selected Onshape entities -> individual DXFs ({'2.5D' if multilayer else '2D'})")
         log(f"Selected face IDs/raw paths: {selected_face_ids}")
         log(f"Selected body IDs/raw paths: {selected_body_ids}")
+        log(f"Selected metadata count: {len(selection_metadata or [])}")
+        if selection_metadata:
+            log(f"Selected metadata sample: {json.dumps(selection_metadata[:2], default=str)[:2000]}")
         log(f"{'='*70}")
 
         selected_face_ids = [str(fid).strip() for fid in (selected_face_ids or []) if str(fid).strip()]
         selected_body_ids = [str(bid).strip() for bid in (selected_body_ids or []) if str(bid).strip()]
+        selection_metadata = selection_metadata or []
+
+        def add_unique(target, value):
+            text = str(value or '').strip()
+            if text and text not in target:
+                target.append(text)
+
+        def collect_selection_ids(obj, key_predicate, target, depth=0):
+            if obj is None or depth > 6:
+                return
+            if isinstance(obj, list):
+                for item in obj:
+                    collect_selection_ids(item, key_predicate, target, depth + 1)
+                return
+            if not isinstance(obj, dict):
+                return
+            for key, value in obj.items():
+                lower_key = str(key).lower()
+                if key_predicate(lower_key):
+                    if isinstance(value, (str, int, float)):
+                        add_unique(target, value)
+                    elif isinstance(value, dict):
+                        for nested_key in ('id', 'value', 'bodyId', 'partId', 'occurrenceId', 'faceId', 'entityId'):
+                            if nested_key in value:
+                                add_unique(target, value.get(nested_key))
+                    elif isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, (str, int, float)):
+                                add_unique(target, item)
+                            elif isinstance(item, dict):
+                                for nested_key in ('id', 'value', 'bodyId', 'partId', 'occurrenceId', 'faceId', 'entityId'):
+                                    if nested_key in item:
+                                        add_unique(target, item.get(nested_key))
+                if isinstance(value, (dict, list)):
+                    collect_selection_ids(value, key_predicate, target, depth + 1)
+
+        for selection in selection_metadata:
+            collect_selection_ids(
+                selection,
+                lambda key: key in ('faceid', 'face', 'entityid', 'geometryid', 'selectionid'),
+                selected_face_ids
+            )
+            collect_selection_ids(
+                selection,
+                lambda key: key in ('bodyid', 'partid', 'occurrenceid', 'partidwithmicroversion', 'owningbodyid', 'solidid', 'ownerid'),
+                selected_body_ids
+            )
+
+        log(f"Expanded selected face IDs/raw paths: {selected_face_ids}")
+        log(f"Expanded selected body IDs/raw paths: {selected_body_ids}")
 
         if not selected_face_ids and not selected_body_ids:
             log("⚠️  No selected face/body IDs supplied")
