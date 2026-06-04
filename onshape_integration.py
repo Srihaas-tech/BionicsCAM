@@ -2004,16 +2004,20 @@ class OnshapeClient:
 
         faces_data = self.list_faces(document_id, workspace_id, element_id)
         if not faces_data:
-            log("❌ list_faces returned None – cannot resolve selected faces")
-            return []
+            log("⚠️  list_faces returned None – trying direct selected-face export fallback")
+            return self._export_face_ids_directly_as_dxfs(
+                document_id, workspace_id, element_id, selected_face_ids
+            )
 
         bodies_with_faces = self.get_body_faces(
             document_id, workspace_id, element_id,
             cached_faces_data=faces_data
         )
         if not bodies_with_faces:
-            log("❌ get_body_faces returned None – cannot resolve selected bodies")
-            return []
+            log("⚠️  get_body_faces returned None – trying direct selected-face export fallback")
+            return self._export_face_ids_directly_as_dxfs(
+                document_id, workspace_id, element_id, selected_face_ids
+            )
 
         # Resolve selected face IDs to their parent body. Keep first face per body.
         selected_by_body = {}
@@ -2091,6 +2095,51 @@ class OnshapeClient:
         log(f"\n{'='*70}")
         log(f"SELECTED MULTI-PART EXPORT complete: {len(results)}/{len(selected_by_body)} selected bodies exported")
         log(f"{'='*70}\n")
+        return results
+
+    def _export_face_ids_directly_as_dxfs(self, document_id, workspace_id, element_id, selected_face_ids):
+        """
+        Last-resort selected import path.
+
+        Some Onshape panel selections arrive as short face tokens (for example
+        JPK/JjG), while the bodydetails endpoint may return no bodies/faces in
+        certain documents or microversion states. In that case, do not fall
+        back to exporting the whole Part Studio. Instead, try exporting each
+        selected face token directly through exportinternal.
+        """
+        results = []
+        seen = set()
+        for index, face_id in enumerate(selected_face_ids, start=1):
+            face_id = str(face_id).strip()
+            if not face_id or face_id in seen:
+                continue
+            seen.add(face_id)
+            log(f"--- Direct selected-face export fallback {index}: {face_id} ---")
+            try:
+                dxf_content = self.export_face_to_dxf(
+                    document_id, workspace_id, element_id,
+                    face_id=face_id,
+                    body_id=None,
+                    face_normal=None
+                )
+            except Exception as exc:
+                log(f"⚠️  Direct selected-face export failed for {face_id}: {exc}")
+                dxf_content = None
+
+            if not dxf_content:
+                log(f"⚠️  Direct selected-face export returned nothing for {face_id}")
+                continue
+
+            results.append({
+                'content': dxf_content,
+                'filename': f"selected_face_{index}_{face_id}.dxf",
+                'body_id': None,
+                'part_name': f"Selected Face {index}",
+                'source_face_id': face_id,
+            })
+            log(f"✅ Direct selected-face export succeeded for {face_id} ({len(dxf_content)} bytes)")
+
+        log(f"Direct selected-face fallback exported {len(results)}/{len(seen)} selected face(s)")
         return results
 
     def export_all_parts_as_dxfs(self, document_id, workspace_id, element_id, multilayer=True):
