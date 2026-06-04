@@ -145,6 +145,26 @@
         });
     }
 
+    // Onshape body IDs are short (≤4 chars, e.g. "JjG").
+    // Face IDs are long deterministic strings. Use length to tell them apart.
+    function extractPartId(sel) {
+        if (sel.partId) return sel.partId;
+        if (sel.bodyId) return sel.bodyId;
+        if (sel.deterministicId) return sel.deterministicId;
+        if (sel.part && sel.part.partId) return sel.part.partId;
+        if (sel.part && sel.part.bodyId) return sel.part.bodyId;
+        const id = sel.selectionId || sel.id || '';
+        if (id && id.length <= 4) return id;
+        return null;
+    }
+
+    function extractFaceId(sel) {
+        if (sel.faceId) return sel.faceId;
+        const id = sel.selectionId || sel.id || '';
+        if (id && id.length > 4) return id;
+        return null;
+    }
+
     function setCurrentSelections(selections) {
         const faceSelections = extractFaceSelections(selections);
 
@@ -155,8 +175,11 @@
         selectedSelections = faceSelections;
 
         const first = faceSelections[0];
-        selectedFaceId = first.selectionId || first.faceId || first.id || null;
-        selectedPartId = first.partId || first.bodyId || null;
+        // Log the raw selection so we can see exactly what Onshape sends
+        console.log('Raw first selection object:', JSON.stringify(first));
+
+        selectedFaceId = extractFaceId(first);
+        selectedPartId = extractPartId(first);
         currentSelection = first;
         isWaitingForSelection = false;
 
@@ -185,15 +208,23 @@
 
     function getSelectedFaceIds() {
         const ids = [];
-
         for (const sel of selectedSelections) {
-            const id = sel.selectionId || sel.faceId || sel.id;
-
-            if (id && !ids.includes(id)) {
-                ids.push(id);
-            }
+            const faceId = extractFaceId(sel);
+            const partId = extractPartId(sel);
+            // If we have a real face ID, use it. Otherwise send body:XYZ so
+            // the server knows to resolve the top face for that body.
+            const id = faceId || (partId ? 'body:' + partId : null);
+            if (id && !ids.includes(id)) ids.push(id);
         }
+        return ids;
+    }
 
+    function getSelectedPartIds() {
+        const ids = [];
+        for (const sel of selectedSelections) {
+            const id = extractPartId(sel);
+            if (id && !ids.includes(id)) ids.push(id);
+        }
         return ids;
     }
 
@@ -291,6 +322,7 @@
             return;
         }
 
+        const selectedPartIds = getSelectedPartIds();
         const params = new URLSearchParams({
             documentId: context.documentId,
             workspaceId: context.workspaceId,
@@ -301,10 +333,14 @@
             selectedOnly: 'true',
             faceIds: selectedFaceIds.join(',')
         });
+        // Also send body IDs so server can resolve face when only body ID is known
+        if (selectedPartIds.length) {
+            params.append('partIds', selectedPartIds.join(','));
+        }
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
 
-        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds);
+        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds, 'partIds=', selectedPartIds);
 
         window.open(url, '_blank');
     }
