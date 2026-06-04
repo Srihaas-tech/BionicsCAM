@@ -1786,12 +1786,22 @@ def onshape_import():
 
             if selected_face_ids or selected_body_ids:
                 log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s), {len(selected_body_ids)} selected body id(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
-                part_exports = client.export_selected_faces_as_dxfs(
-                    document_id, workspace_id, element_id,
-                    selected_face_ids,
-                    selected_body_ids=selected_body_ids,
-                    multilayer=multilayer_for_multi
-                )
+                try:
+                    part_exports = client.export_selected_faces_as_dxfs(
+                        document_id, workspace_id, element_id,
+                        selected_face_ids,
+                        selected_body_ids=selected_body_ids,
+                        multilayer=multilayer_for_multi
+                    )
+                except Exception as selected_export_error:
+                    log(f"❌ Selected Onshape export crashed: {selected_export_error}")
+                    log(traceback.format_exc())
+                    return jsonify({
+                        'error': 'Selected Onshape export crashed',
+                        'message': str(selected_export_error),
+                        'selected_face_count': len(selected_face_ids),
+                        'selected_body_count': len(selected_body_ids)
+                    }), 500
                 empty_message = (
                     'BionicsCAM could not resolve/export the selected Onshape faces. '
                     f'Received {len(selected_face_ids)} face id(s) and {len(selected_body_ids)} body id(s). '
@@ -1842,7 +1852,7 @@ def onshape_import():
                                  dxf_file='', dxf_content_inline=None,
                                  dxf_files_inline=dxf_files_inline,
                                  from_onshape=True, document_id=document_id,
-                                 face_id='', suggested_filename='Onshape_selected_import' if selected_face_ids else 'Onshape_multi_import', detected_thickness=None,
+                                 face_id='', suggested_filename='Onshape_selected_import' if (selected_face_ids or selected_body_ids) else 'Onshape_multi_import', detected_thickness=None,
                                  user_name=session.get('user_name'), team_name=session.get('team_name'),
                                  drive_enabled=drive_enabled, machine_x_max=machine_x_max,
                                  machine_y_max=machine_y_max, default_tool_diameter=default_tool_diameter,
