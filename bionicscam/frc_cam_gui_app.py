@@ -1822,16 +1822,28 @@ def onshape_import():
         if multi_parts:
             multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
             selected_face_ids_raw = raw_params.get('faceIds', '').strip()
+            selected_body_ids_raw = raw_params.get('bodyIds', '').strip()
             selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
+            selected_body_ids = [bid.strip() for bid in selected_body_ids_raw.split(',') if bid.strip()]
 
-            if selected_face_ids:
-                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+            if selected_face_ids or selected_body_ids:
+                log(
+                    f"🗂️  Selected multi-part import requested – exporting "
+                    f"{len(selected_face_ids)} selected face id(s), "
+                    f"{len(selected_body_ids)} selected body id(s) as separate "
+                    f"{'2.5D' if multilayer_for_multi else '2D'} DXFs"
+                )
                 part_exports = client.export_selected_faces_as_dxfs(
                     document_id, workspace_id, element_id,
                     selected_face_ids,
+                    selected_body_ids=selected_body_ids,
                     multilayer=multilayer_for_multi
                 )
-                empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
+                empty_message = (
+                    'BionicsCAM could not resolve/export the selected Onshape faces. '
+                    f'Received {len(selected_face_ids)} face id(s) and {len(selected_body_ids)} body id(s). '
+                    'Try selecting one large flat face per part, then click Import selected parts again.'
+                )
             else:
                 log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
                 part_exports = client.export_all_parts_as_dxfs(
