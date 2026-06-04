@@ -1205,15 +1205,52 @@ document.addEventListener('DOMContentLoaded', () => {
             const entities = [];
             const layers = new Map();
             const placements = [];
-            let x = 0;
-            let y = 0;
-            let rowH = 0;
+            const EPS = 1e-6;
+
+            function overlapsExisting(candidate, existing) {
+                const separated =
+                    candidate.x + candidate.w + gap <= existing.x + EPS ||
+                    candidate.x >= existing.x + existing.w + gap - EPS ||
+                    candidate.y + candidate.h + gap <= existing.y + EPS ||
+                    candidate.y >= existing.y + existing.h + gap - EPS;
+                return !separated;
+            }
+
+            function findBottomLeftSlot(slotW, slotH) {
+                const xs = new Set([0]);
+                const ys = new Set([0]);
+                for (const placed of placements) {
+                    xs.add(placed.x);
+                    xs.add(placed.x + placed.w + gap);
+                    ys.add(placed.y);
+                    ys.add(placed.y + placed.h + gap);
+                }
+
+                const sortedYs = Array.from(ys).filter(Number.isFinite).sort((a, b) => a - b);
+                const sortedXs = Array.from(xs).filter(Number.isFinite).sort((a, b) => a - b);
+
+                let best = null;
+                for (const candidateY of sortedYs) {
+                    for (const candidateX of sortedXs) {
+                        const candidate = { x: candidateX, y: candidateY, w: slotW, h: slotH };
+                        if (candidate.x + candidate.w > stock.width + EPS) continue;
+                        if (candidate.y + candidate.h > stock.height + EPS) continue;
+                        if (placements.some(placed => overlapsExisting(candidate, placed))) continue;
+
+                        if (!best || candidate.y < best.y - EPS ||
+                            (Math.abs(candidate.y - best.y) <= EPS && candidate.x < best.x)) {
+                            best = candidate;
+                        }
+                    }
+                }
+                return best;
+            }
 
             for (const part of packParts) {
-                if (x > 0 && x + part.slotW > stock.width) {
-                    x = 0;
-                    y += rowH + gap;
-                    rowH = 0;
+                const slot = findBottomLeftSlot(part.slotW, part.slotH);
+                if (!slot) {
+                    console.warn(`No preview slot found for part ${part.originalIndex + 1}; skipping it.`);
+                    continue;
                 }
 
                 const layerName = `preview_part_${part.originalIndex + 1}`;
@@ -1226,14 +1263,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
 
                 for (const entity of part.geometry.entities || []) {
-                    const cloned = cloneEntityForPreview(entity, part.bounds, part.rotated, x, y, layerName);
+                    const cloned = cloneEntityForPreview(entity, part.bounds, part.rotated, slot.x, slot.y, layerName);
                     entities.push(cloned);
                     layers.get(layerName).entities.push(cloned);
                 }
 
-                placements.push({ x, y, w: part.slotW, h: part.slotH, name: '', rotated: part.rotated });
-                x += part.slotW + gap;
-                rowH = Math.max(rowH, part.slotH);
+                placements.push({ x: slot.x, y: slot.y, w: part.slotW, h: part.slotH, name: '', rotated: part.rotated });
             }
 
             dxfGeometry = {
