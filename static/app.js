@@ -1075,12 +1075,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         function getPreviewStockSize() {
-            const machineXMax = Number(window.MACHINE_CONFIG?.xMax);
-            const machineYMax = Number(window.MACHINE_CONFIG?.yMax);
-            return {
-                width: Number.isFinite(machineXMax) && machineXMax > 0 ? machineXMax : 48.0,
-                height: Number.isFinite(machineYMax) && machineYMax > 0 ? machineYMax : 48.0
-            };
+            const machineXMax = Number(window.MACHINE_CONFIG?.xMax) || 48.0;
+            const machineYMax = Number(window.MACHINE_CONFIG?.yMax) || 48.0;
+            return { width: machineXMax, height: machineYMax };
         }
 
         function transformPreviewPoint(x, y, bounds, rotated) {
@@ -1125,35 +1122,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
         function buildCompositePreview(parts) {
             const stock = getPreviewStockSize();
-            const gap = Math.max(Number(document.getElementById('toolDiameter')?.value) || 0.157, 0.01);
+            const gap = 0.0; // V1 auto-nest: press bounding boxes against each other
             const rotationMode = document.getElementById('nestRotation')?.value || 'auto';
             const colors = [0xFDB515, 0x58A6FF, 0xA371F7, 0x2EA043, 0xF778BA, 0xFF7B72, 0x79C0FF, 0xD2A8FF];
 
             const packParts = parts
-                .filter(part => (
-                    part &&
-                    part.geometry &&
-                    part.bounds &&
-                    Number.isFinite(part.bounds.width) && part.bounds.width > 0 &&
-                    Number.isFinite(part.bounds.height) && part.bounds.height > 0 &&
-                    Number.isFinite(part.geometry.minX) && Number.isFinite(part.geometry.minY) &&
-                    Number.isFinite(part.geometry.maxX) && Number.isFinite(part.geometry.maxY) &&
-                    Array.isArray(part.geometry.entities) && part.geometry.entities.length > 0
-                ))
+                .filter(part => part && part.geometry && part.bounds && Number.isFinite(part.bounds.width) && Number.isFinite(part.bounds.height))
                 .map((part, originalIndex) => {
                     let rotated = false;
                     if (rotationMode === '90') rotated = true;
-                    else if (rotationMode === 'auto') rotated = part.bounds.height > part.bounds.width;
+                    else if (rotationMode === 'auto') rotated = part.bounds.height < part.bounds.width; // Match backend: rotate wide parts to reduce row width
                     const slotW = rotated ? part.bounds.height : part.bounds.width;
                     const slotH = rotated ? part.bounds.width : part.bounds.height;
                     return { ...part, originalIndex, rotated, slotW, slotH, area: slotW * slotH };
                 })
                 .sort((a, b) => b.area - a.area);
-
-            if (packParts.length === 0) {
-                showError('Preview failed', 'No valid DXF geometry was found for auto-nesting. Try exporting the selected flat face again.');
-                return;
-            }
 
             const entities = [];
             const layers = new Map();
@@ -1642,12 +1625,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const availHeight = height - 2 * padding;
             
             // Apply rotation to bounds for calculating display size
-            let displayWidth = Number(dxfBounds?.width);
-            let displayHeight = Number(dxfBounds?.height);
+            let displayWidth = Number(dxfBounds.width);
+            let displayHeight = Number(dxfBounds.height);
             if (!Number.isFinite(displayWidth) || displayWidth <= 0) displayWidth = Number(window.MACHINE_CONFIG?.xMax) || 48.0;
             if (!Number.isFinite(displayHeight) || displayHeight <= 0) displayHeight = Number(window.MACHINE_CONFIG?.yMax) || 48.0;
-            const boundsCenterX = Number.isFinite(Number(dxfBounds?.centerX)) ? Number(dxfBounds.centerX) : displayWidth / 2;
-            const boundsCenterY = Number.isFinite(Number(dxfBounds?.centerY)) ? Number(dxfBounds.centerY) : displayHeight / 2;
             if (rotationAngle === 90 || rotationAngle === 270) {
                 [displayWidth, displayHeight] = [displayHeight, displayWidth];
             }
@@ -1675,8 +1656,8 @@ document.addEventListener('DOMContentLoaded', () => {
             
             function toCanvasCoords(x, y) {
                 // Translate to center origin
-                let dx = x - boundsCenterX;
-                let dy = y - boundsCenterY;
+                let dx = x - dxfBounds.centerX;
+                let dy = y - dxfBounds.centerY;
                 
                 // Apply rotation
                 const rotated = rotatePoint(dx, dy, rotationAngle);
@@ -1862,8 +1843,8 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.textBaseline = 'top';
 
             // Check if part fits within machine bounds
-            const machineXMax = Number(window.MACHINE_CONFIG?.xMax) || 48.0;
-            const machineYMax = Number(window.MACHINE_CONFIG?.yMax) || 48.0;
+            const machineXMax = window.MACHINE_CONFIG?.xMax || 48.0;
+            const machineYMax = window.MACHINE_CONFIG?.yMax || 96.0;
             const fitsInMachine = displayWidth <= machineXMax && displayHeight <= machineYMax;
 
             if (fitsInMachine) {
