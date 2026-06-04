@@ -141,10 +141,49 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
         return '\n'.join(lines[start:end])
 
     placements = []
-    x_cursor = 0.0
-    y_cursor = 0.0
-    row_height = 0.0
     max_x_used = 0.0
+    EPS = 1e-6
+
+    def overlaps_existing(candidate, existing):
+        separated = (
+            candidate['x'] + candidate['slot_w'] + gap <= existing['x'] + EPS or
+            candidate['x'] >= existing['x'] + existing['slot_w'] + gap - EPS or
+            candidate['y'] + candidate['slot_h'] + gap <= existing['y'] + EPS or
+            candidate['y'] >= existing['y'] + existing['slot_h'] + gap - EPS
+        )
+        return not separated
+
+    def find_bottom_left_slot(slot_w, slot_h):
+        candidate_xs = {0.0}
+        candidate_ys = {0.0}
+        for placed in placements:
+            candidate_xs.add(placed['x'])
+            candidate_xs.add(placed['x'] + placed['slot_w'] + gap)
+            candidate_ys.add(placed['y'])
+            candidate_ys.add(placed['y'] + placed['slot_h'] + gap)
+
+        best = None
+        for candidate_y in sorted(candidate_ys):
+            for candidate_x in sorted(candidate_xs):
+                candidate = {
+                    'x': candidate_x,
+                    'y': candidate_y,
+                    'slot_w': slot_w,
+                    'slot_h': slot_h,
+                }
+                if candidate_x + slot_w > stock_x + EPS:
+                    continue
+                if candidate_y + slot_h > stock_y + EPS:
+                    continue
+                if any(overlaps_existing(candidate, placed) for placed in placements):
+                    continue
+                if (
+                    best is None or
+                    candidate_y < best['y'] - EPS or
+                    (abs(candidate_y - best['y']) <= EPS and candidate_x < best['x'])
+                ):
+                    best = candidate
+        return best
 
     for idx, part in enumerate(parts):
         do_rotate = choose_rotation(part)
@@ -157,35 +196,25 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
             gcode = part['result'].gcode
             rot_label = '0°'
 
-        if x_cursor > 0 and (x_cursor + slot_w) > stock_x:
-            x_cursor = 0.0
-            y_cursor += row_height + gap
-            row_height = 0.0
-
-        if (x_cursor + slot_w) > stock_x and x_cursor == 0.0 and idx == 0:
-            # First part is simply too large for the stock; let it through but warn later.
-            pass
-
-        if (y_cursor + slot_h) > stock_y:
+        slot = find_bottom_left_slot(slot_w, slot_h)
+        if slot is None:
             raise ValueError(
-                f'Not enough stock space for part {idx + 1}: needed {(slot_w):.3f}\" x {(slot_h):.3f}\", '
-                f'but only {(stock_x - x_cursor):.3f}\" x {(stock_y - y_cursor):.3f}\" remained.'
+                f'Not enough stock space for part {idx + 1}: needed {slot_w:.3f}" x {slot_h:.3f}" '
+                f'with {gap:.3f}" clearance on a {stock_x:.3f}" x {stock_y:.3f}" sheet.'
             )
 
-        placements.append({
+        placement = {
             'index': idx,
             'source_name': part['source_name'],
             'gcode': gcode,
-            'x': x_cursor,
-            'y': y_cursor,
+            'x': slot['x'],
+            'y': slot['y'],
             'slot_w': slot_w,
             'slot_h': slot_h,
             'rotation_label': rot_label,
-        })
-
-        max_x_used = max(max_x_used, x_cursor + slot_w)
-        x_cursor += slot_w + gap
-        row_height = max(row_height, slot_h)
+        }
+        placements.append(placement)
+        max_x_used = max(max_x_used, placement['x'] + slot_w)
 
     combined_blocks = []
     for placement in placements:
@@ -199,7 +228,8 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
             combined_blocks.append(extract_toolpath(shifted))
 
     combined_gcode = '\n'.join(combined_blocks)
-    return combined_gcode, placements, max_x_used, y_cursor + row_height
+    max_y_used = max((p['y'] + p['slot_h'] for p in placements), default=0.0)
+    return combined_gcode, placements, max_x_used, max_y_used
 import atexit
 import time
 import threading
