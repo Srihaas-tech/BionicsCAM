@@ -1974,66 +1974,146 @@ class OnshapeClient:
             log(f"Error parsing Onshape URL: {e}")
             return None
 
+    def _looks_like_dxf(self, content):
+        """Return True when a response looks like DXF text instead of an HTML/JSON error."""
+        if not content:
+            return False
+        if isinstance(content, str):
+            preview = content[:500]
+        else:
+            preview = content[:500].decode('utf-8', errors='ignore')
+        normalized = preview.upper()
+        return 'SECTION' in normalized and ('ENTITIES' in normalized or 'HEADER' in normalized)
 
-    def export_selected_face_id_to_dxf(self, document_id, workspace_id, element_id, face_id, microversion_id=None):
-        """
-        Safely export one selected Onshape face ID as a DXF.
-
-        This is intentionally stricter than export_face_to_dxf(): it only tries
-        the direct exportinternal face export and never falls back to whole
-        Part Studio translation/export. That keeps selected multi-part import
-        from accidentally importing every body in the studio.
-        """
-        face_id = str(face_id or '').strip()
-        if not face_id:
-            return None
-
-        endpoints = []
-        if microversion_id:
-            endpoints.append((
-                f"/documents/d/{document_id}/m/{microversion_id}/e/{element_id}/exportinternal",
-                f"microversion {microversion_id}"
-            ))
-        endpoints.append((
-            f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal",
-            f"workspace {workspace_id}"
-        ))
-
-        body = {
-            "format": "DXF",
-            "view": "1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1",
-            "version": "2013",
-            "units": "inch",
-            "flatten": "true",
-            "includeBendCenterlines": "true",
-            "includeSketches": "false",
-            "splinesAsPolylines": "true",
-            "triggerAutoDownload": "true",
-            "storeInDocument": "false",
-            "partIds": face_id
-        }
-
-        for endpoint, label in endpoints:
-            try:
-                log(f"Trying safe selected-face DXF export for {face_id} via {label}")
-                log(f"Endpoint: {self.API_BASE}{endpoint}")
-                response = self._make_api_request('POST', endpoint, json=body)
-                log(f"Selected-face export response for {face_id}: HTTP {response.status_code}")
-                if response.status_code == 200 and response.content:
-                    preview = response.content[:128].decode('utf-8', errors='ignore')
-                    if 'SECTION' in preview or 'HEADER' in preview or len(response.content) > 256:
-                        log(f"Selected-face export succeeded for {face_id}: {len(response.content)} bytes")
-                        return response.content
-                    log(f"Selected-face export for {face_id} returned non-DXF-looking content: {preview[:80]}")
-                else:
-                    log(f"Selected-face export failed for {face_id}: {response.text[:500]}")
-            except Exception as exc:
-                log(f"Selected-face export exception for {face_id}: {exc}")
-                log(traceback.format_exc())
-
+    def _extract_selection_microversion(self, raw_selection_records):
+        """Pull the workspace microversion ID from Onshape selection records, if present."""
+        for record in raw_selection_records or []:
+            if not isinstance(record, dict):
+                continue
+            for key in ('workspaceMicroversionId', 'microversionId', 'microversion'):
+                value = record.get(key)
+                if value:
+                    return str(value)
         return None
 
-    def export_selected_faces_as_dxfs(self, document_id, workspace_id, element_id, selected_face_ids, multilayer=True, selected_records=None):
+    def _export_face_direct_only(self, document_id, workspace_id, element_id, face_id, microversion_id=None):
+        """
+        Export one selected Onshape face using only the selected-face export path.
+
+        This deliberately does NOT fall back to whole-element translation/export,
+        because that is how the old "import all 9 bodies" raccoon escaped.
+        """
+        if microversion_id:
+            endpoint = f"/documents/d/{document_id}/m/{microversion_id}/e/{element_id}/exportinternal"
+            route_label = 'microversion'
+        else:
+            endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
+            route_label = 'workspace'
+
+        view_matrix = "1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1"
+        request_bodies = [
+            {
+                "format": "DXF",
+                "view": view_matrix,
+                "version": "2013",
+                "units": "inch",
+                "flatten": "true",
+                "includeBendCenterlines": "true",
+                "includeSketches": "false",
+                "splinesAsPolylines": "true",
+                "triggerAutoDownload": "true",
+                "storeInDocument": "false",
+                "partIds": str(face_id),
+            },
+            {
+                "format": "DXF",
+                "view": view_matrix,
+                "version": "2013",
+                "units": "inch",
+                "flatten": "true",
+                "includeBendCenterlines": "true",
+                "includeSketches": "false",
+                "splinesAsPolylines": "true",
+                "triggerAutoDownload": "true",
+                "storeInDocument": "false",
+                "faceIds": str(face_id),
+            },
+        ]
+
+        attempts = []
+        for body in request_bodies:
+            key = 'partIds' if 'partIds' in body else 'faceIds'
+            try:
+                log(f"Trying direct selected-face export ({route_label}, {key}={face_id})")
+                response = self._make_api_request('POST', endpoint, json=body)
+                attempt = {
+                    'route': route_label,
+                    'selector_key': key,
+                    'face_id': str(face_id),
+                    'status_code': response.status_code,
+                    'content_type': response.headers.get('content-type', ''),
+                    'response_preview': response.text[:300] if response.text else '',
+                }
+                attempts.append(attempt)
+                if response.status_code == 200 and self._looks_like_dxf(response.content):
+                    log(f"✅ Direct selected-face export worked for {face_id} using {route_label}/{key}")
+                    return response.content, attempts
+                log(f"Direct selected-face export failed/invalid for {face_id}: {attempt}")
+            except Exception as error:
+                attempt = {
+                    'route': route_label,
+                    'selector_key': key,
+                    'face_id': str(face_id),
+                    'error': str(error),
+                }
+                attempts.append(attempt)
+                log(f"Direct selected-face export exception for {face_id}: {error}")
+
+        return None, attempts
+
+    def _export_selected_faces_direct_only(self, document_id, workspace_id, element_id, selected_face_ids, raw_selection_records=None):
+        """Try direct selected-face DXF export for every selected face ID."""
+        raw_selection_records = raw_selection_records or []
+        microversion_id = self._extract_selection_microversion(raw_selection_records)
+        results = []
+        attempts = []
+
+        self.last_selected_export_debug = {
+            'selected_face_ids': list(selected_face_ids or []),
+            'raw_selection_record_count': len(raw_selection_records),
+            'raw_selection_record_samples': [json.dumps(item, default=str)[:500] for item in raw_selection_records[:5]],
+            'selection_microversion_id': microversion_id,
+            'direct_export_attempts': attempts,
+        }
+
+        for face_id in selected_face_ids or []:
+            content = None
+            if microversion_id:
+                content, face_attempts = self._export_face_direct_only(
+                    document_id, workspace_id, element_id, face_id, microversion_id=microversion_id
+                )
+                attempts.extend(face_attempts)
+
+            if not content:
+                content, face_attempts = self._export_face_direct_only(
+                    document_id, workspace_id, element_id, face_id, microversion_id=None
+                )
+                attempts.extend(face_attempts)
+
+            if content:
+                safe_face_id = re.sub(r'[^\w\-]+', '_', str(face_id)).strip('_') or 'selected_face'
+                results.append({
+                    'content': content,
+                    'filename': f"Onshape_selected_{safe_face_id}.dxf",
+                    'body_id': safe_face_id,
+                    'part_name': f"Selected {safe_face_id}",
+                    'source_face_id': str(face_id),
+                })
+
+        self.last_selected_export_debug['exported_count'] = len(results)
+        return results
+
+    def export_selected_faces_as_dxfs(self, document_id, workspace_id, element_id, selected_face_ids, multilayer=True, selected_body_ids=None, raw_selection_records=None):
         """
         Export only the bodies that correspond to selected face IDs.
 
@@ -2049,51 +2129,40 @@ class OnshapeClient:
         log(f"Selected face IDs: {selected_face_ids}")
         log(f"{'='*70}")
 
+        raw_selection_records = raw_selection_records or []
+        selected_body_ids = [str(bid).strip() for bid in (selected_body_ids or []) if str(bid).strip()]
+
         if not selected_face_ids:
             log("⚠️  No selected face IDs supplied")
             return []
 
         selected_face_ids = [str(fid).strip() for fid in selected_face_ids if str(fid).strip()]
         selected_face_set = set(selected_face_ids)
-        selected_records = selected_records or []
-
-        microversion_id = None
-        for record in selected_records:
-            if isinstance(record, dict):
-                microversion_id = record.get('workspaceMicroversionId') or record.get('microversionId') or microversion_id
-
-        def export_direct_selected_faces(reason):
-            log(f"⚠️  Falling back to safe direct selected-face export: {reason}")
-            direct_results = []
-            for index, fid in enumerate(selected_face_ids, start=1):
-                dxf_content = self.export_selected_face_id_to_dxf(
-                    document_id, workspace_id, element_id, fid, microversion_id=microversion_id
-                )
-                if not dxf_content:
-                    log(f"⚠️  Safe direct selected-face export returned nothing for {fid}")
-                    continue
-                direct_results.append({
-                    'content': dxf_content,
-                    'filename': f"Selected_Face_{index}.dxf",
-                    'body_id': fid,
-                    'part_name': f"Selected Face {index}",
-                    'source_face_id': fid,
-                })
-                log(f"✅ Direct-exported selected face {fid} → Selected_Face_{index}.dxf ({len(dxf_content)} bytes)")
-            return direct_results
+        self.last_selected_export_debug = {
+            'selected_face_ids': selected_face_ids,
+            'selected_body_ids': selected_body_ids,
+            'raw_selection_record_count': len(raw_selection_records),
+            'raw_selection_record_samples': [json.dumps(item, default=str)[:500] for item in raw_selection_records[:5]],
+        }
 
         faces_data = self.list_faces(document_id, workspace_id, element_id)
         if not faces_data:
-            log("❌ list_faces returned None – cannot resolve selected faces")
-            return export_direct_selected_faces('bodydetails/list_faces returned no data')
+            log("❌ list_faces returned None – trying direct selected-face export")
+            self.last_selected_export_debug['bodydetails_error'] = 'list_faces returned no data'
+            return self._export_selected_faces_direct_only(
+                document_id, workspace_id, element_id, selected_face_ids, raw_selection_records=raw_selection_records
+            )
 
         bodies_with_faces = self.get_body_faces(
             document_id, workspace_id, element_id,
             cached_faces_data=faces_data
         )
         if not bodies_with_faces:
-            log("❌ get_body_faces returned None – cannot resolve selected bodies")
-            return export_direct_selected_faces('bodydetails contained no usable bodies/faces')
+            log("❌ get_body_faces returned None – trying direct selected-face export")
+            self.last_selected_export_debug['bodydetails_error'] = 'get_body_faces returned no bodies/faces'
+            return self._export_selected_faces_direct_only(
+                document_id, workspace_id, element_id, selected_face_ids, raw_selection_records=raw_selection_records
+            )
 
         # Resolve selected face IDs to their parent body. Keep first face per body.
         selected_by_body = {}
@@ -2115,8 +2184,18 @@ class OnshapeClient:
             log(f"⚠️  Could not resolve selected face IDs: {missing}")
 
         if not selected_by_body:
-            log("❌ None of the selected faces resolved to solid bodies")
-            return export_direct_selected_faces('selected face IDs did not match bodydetails faces')
+            log("❌ None of the selected faces resolved to solid bodies – trying direct selected-face export")
+            self.last_selected_export_debug['bodydetails_error'] = 'selected IDs did not match bodydetails faces'
+            self.last_selected_export_debug['available_body_ids'] = list(bodies_with_faces.keys())[:20]
+            available_faces = []
+            for body_data in bodies_with_faces.values():
+                for face in body_data.get('faces', []):
+                    if face.get('id'):
+                        available_faces.append(face.get('id'))
+            self.last_selected_export_debug['available_face_samples'] = available_faces[:20]
+            return self._export_selected_faces_direct_only(
+                document_id, workspace_id, element_id, selected_face_ids, raw_selection_records=raw_selection_records
+            )
 
         results = []
         for bid, item in selected_by_body.items():
