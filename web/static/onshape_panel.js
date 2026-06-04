@@ -94,11 +94,13 @@
             }
 
             if (importAllPartsBtn) {
-                importAllPartsBtn.textContent = '⬆ Import selected part(s) as 2.5D';
+                importAllPartsBtn.textContent = getSelectedFaceIds().length >= 1
+                    ? '⬆ Import selected part(s) as 2.5D'
+                    : '⬆ Import all parts as 2.5D';
             }
 
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture, then import the selected part(s)';
+                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture, or import all parts';
                 instruction.style.color = '';
             }
         } else {
@@ -111,11 +113,13 @@
             }
 
             if (importAllPartsBtn) {
-                importAllPartsBtn.textContent = '⬆ Import selected part(s) as 2D';
+                importAllPartsBtn.textContent = getSelectedFaceIds().length >= 1
+                    ? '⬆ Import selected part(s) as 2D'
+                    : '⬆ Import all parts as 2D';
             }
 
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture, then import the selected part(s)';
+                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture, or import all parts';
                 instruction.style.color = '';
             }
         }
@@ -140,7 +144,7 @@
     function extractFaceSelections(selections) {
         return (selections || []).filter(sel => {
             const entityType = String(sel.entityType || sel.selectionType || '').toUpperCase();
-            const id = sel.selectionId || sel.faceId || sel.id;
+            const id = sel.faceId || sel.id || sel.selectionId;
             return !!id && (entityType.includes('FACE') || entityType.includes('ENTITY') || !entityType);
         });
     }
@@ -155,8 +159,8 @@
         selectedSelections = faceSelections;
 
         const first = faceSelections[0];
-        selectedFaceId = first.selectionId || first.faceId || first.id || null;
-        selectedPartId = first.partId || first.bodyId || null;
+        selectedFaceId = first.faceId || first.id || first.selectionId || null;
+        selectedPartId = first.bodyId || first.partId || first.occurrenceId || null;
         currentSelection = first;
         isWaitingForSelection = false;
 
@@ -187,9 +191,6 @@
         const ids = [];
 
         for (const sel of selectedSelections) {
-            // Prefer the raw face/entity id when Onshape provides it.
-            // selectionId can be a higher-level selection path that does not
-            // always match the Part Studio bodydetails face id.
             const id = sel.faceId || sel.id || sel.selectionId;
 
             if (id && !ids.includes(id)) {
@@ -204,7 +205,7 @@
         const ids = [];
 
         for (const sel of selectedSelections) {
-            const id = sel.bodyId || sel.partId || sel.partIdString;
+            const id = sel.bodyId || sel.partId || sel.occurrenceId;
 
             if (id && !ids.includes(id)) {
                 ids.push(id);
@@ -302,24 +303,24 @@
         const selectedFaceIds = getSelectedFaceIds();
         const selectedBodyIds = getSelectedBodyIds();
 
-        if (!selectedFaceIds.length && !selectedBodyIds.length) {
-            instruction.innerHTML = 'Select one or more faces first, then import the selected part(s).';
-            instruction.style.color = '#b45309';
-            instruction.style.display = 'block';
-            return;
-        }
-
         const params = new URLSearchParams({
             documentId: context.documentId,
             workspaceId: context.workspaceId,
             elementId: context.elementId,
             server: context.server || 'https://cad.onshape.com',
             multilayer: isMultilayer ? 'true' : 'false',
-            multi: 'true',
-            selectedOnly: 'true',
-            faceIds: selectedFaceIds.join(','),
-            bodyIds: selectedBodyIds.join(',')
+            multi: 'true'
         });
+
+        if (selectedFaceIds.length >= 1) {
+            params.append('faceIds', selectedFaceIds.join(','));
+            params.append('selectedOnly', 'true');
+        }
+
+        if (selectedBodyIds.length >= 1) {
+            params.append('bodyIds', selectedBodyIds.join(','));
+            params.append('selectedOnly', 'true');
+        }
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
 
