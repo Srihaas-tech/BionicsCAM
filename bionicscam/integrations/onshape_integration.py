@@ -51,13 +51,6 @@ class OnshapeClient:
         self.refresh_token = None
         self.token_expires = None
     
-    def _api_ref_path(self, workspace_id, microversion_id=None):
-        """Return Onshape API path segment for workspace or exact microversion."""
-        microversion_id = str(microversion_id or '').strip()
-        if microversion_id:
-            return f"m/{microversion_id}"
-        return f"w/{workspace_id}"
-
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
         # Try to load from file first
@@ -438,7 +431,10 @@ class OnshapeClient:
         
         # Try the internal export endpoint that Onshape's web UI uses
         log("\n[Method 1] Trying exportinternal endpoint (web UI method)...")
-        endpoint = f"/documents/d/{document_id}/{self._api_ref_path(workspace_id, microversion_id)}/e/{element_id}/exportinternal"
+        if microversion_id:
+            endpoint = f"/documents/d/{document_id}/m/{microversion_id}/e/{element_id}/exportinternal"
+        else:
+            endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
         
         try:
             # For Part Studios, Onshape's "partIds" parameter actually expects face IDs, not body IDs
@@ -488,6 +484,10 @@ class OnshapeClient:
         except Exception as e:
             log(f"Error with exportinternal: {e}")
             log(traceback.format_exc())
+
+        if not allow_fallbacks:
+            log("Selected export fallback disabled; not exporting the entire Part Studio")
+            return None
         
         # Fallback: Try async translations API
         log("\n[Method 2] Trying async translations API...")
@@ -497,7 +497,7 @@ class OnshapeClient:
         
         # Fallback: Try POST /export endpoint
         log("\n[Method 3] Trying POST /export endpoint...")
-        endpoint = f"/partstudios/d/{document_id}/{self._api_ref_path(workspace_id, microversion_id)}/e/{element_id}/export"
+        endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/export"
         
         try:
             body = {
@@ -690,7 +690,10 @@ class OnshapeClient:
         Returns:
             Dict with bodies and their faces, or None if failed
         """
-        endpoint = f"/partstudios/d/{document_id}/{self._api_ref_path(workspace_id, microversion_id)}/e/{element_id}/bodydetails"
+        if microversion_id:
+            endpoint = f"/partstudios/d/{document_id}/m/{microversion_id}/e/{element_id}/bodydetails"
+        else:
+            endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/bodydetails"
 
         try:
             log(f"\n{'='*70}")
@@ -839,6 +842,8 @@ class OnshapeClient:
         log(f"{'='*70}")
         log(f"Document: {document_id}")
         log(f"Workspace: {workspace_id}")
+        if microversion_id:
+            log(f"Microversion: {microversion_id}")
         log(f"Element: {element_id}")
         log(f"Requested body_id: {body_id if body_id else '(auto-detect)'}")
         log(f"Using cached data: {cached_faces_data is not None}")
@@ -1582,7 +1587,10 @@ class OnshapeClient:
         Returns:
             DXF file content as bytes, or None if failed
         """
-        endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
+        if microversion_id:
+            endpoint = f"/documents/d/{document_id}/m/{microversion_id}/e/{element_id}/exportinternal"
+        else:
+            endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
 
         try:
             # Calculate view matrix based on face normal
@@ -1987,8 +1995,7 @@ class OnshapeClient:
 
     def export_selected_faces_as_dxfs(self, document_id, workspace_id, element_id,
                                       selected_face_ids, selected_body_ids=None,
-                                      raw_selection_records=None,
-                                      multilayer=True):
+                                      selected_records=None, multilayer=True):
         """
         Export only user-selected Onshape faces as separate DXFs.
 
@@ -2001,37 +2008,43 @@ class OnshapeClient:
         log(f"MULTI-PART EXPORT: selected Onshape entities -> individual DXFs ({'2.5D' if multilayer else '2D'})")
         log(f"Selected face IDs/raw paths: {selected_face_ids}")
         log(f"Selected body IDs/raw paths: {selected_body_ids}")
-        log(f"Raw selection records: {raw_selection_records}")
         log(f"{'='*70}")
 
         selected_face_ids = [str(fid).strip() for fid in (selected_face_ids or []) if str(fid).strip()]
         selected_body_ids = [str(bid).strip() for bid in (selected_body_ids or []) if str(bid).strip()]
+        selected_records = selected_records or []
+        if not isinstance(selected_records, list):
+            selected_records = []
 
-        def normalize_selection_records(records):
-            if not records:
-                return []
-            if isinstance(records, str):
-                try:
-                    records = json.loads(records)
-                except Exception:
-                    return []
-            if isinstance(records, dict):
-                return [records]
-            if isinstance(records, list):
-                return [r for r in records if isinstance(r, dict)]
-            return []
+        def short(value, limit=400):
+            text = str(value)
+            return text if len(text) <= limit else text[:limit] + '...'
 
-        selection_records = normalize_selection_records(raw_selection_records)
+        raw_record_samples = []
         microversion_ids = []
-        for rec in selection_records:
-            for key in ('workspaceMicroversionId', 'microversionId', 'microversion', 'sourceMicroversionId'):
-                value = rec.get(key)
-                if value and str(value).strip() not in microversion_ids:
-                    microversion_ids.append(str(value).strip())
+        for record in selected_records:
+            try:
+                raw_record_samples.append(short(json.dumps(record, default=str)))
+            except Exception:
+                raw_record_samples.append(short(record))
+            if isinstance(record, dict):
+                mv = record.get('workspaceMicroversionId') or record.get('microversionId') or record.get('microversion')
+                if mv and mv not in microversion_ids:
+                    microversion_ids.append(str(mv))
 
-        export_refs = microversion_ids + [None]
-        if microversion_ids:
-            log(f"Selection microversion candidates: {microversion_ids}")
+        self.last_selected_export_debug = {
+            'selected_face_ids': selected_face_ids[:20],
+            'selected_body_ids': selected_body_ids[:20],
+            'raw_selection_record_count': len(selected_records),
+            'raw_selection_record_samples': raw_record_samples[:5],
+            'microversion_ids': microversion_ids[:10],
+            'direct_export_attempts': [],
+            'bodydetails_attempts': [],
+            'available_body_ids': [],
+            'available_face_samples': [],
+            'matched_body_ids': [],
+            'matched_face_ids': [],
+        }
 
         if not selected_face_ids and not selected_body_ids:
             log("⚠️  No selected face/body IDs supplied")
@@ -2060,25 +2073,31 @@ class OnshapeClient:
 
             log(f"\n--- Direct selected-face export {index}: {face_id} ---")
             dxf_content = None
-            used_microversion = None
-            for ref_microversion in export_refs:
+            version_attempts = microversion_ids + [None]
+            for mv in version_attempts:
+                attempt = {
+                    'face_id': face_id,
+                    'microversion_id': mv,
+                    'endpoint_kind': 'microversion' if mv else 'workspace'
+                }
+                self.last_selected_export_debug['direct_export_attempts'].append(attempt)
                 try:
-                    if ref_microversion:
-                        log(f"Trying selected-face export using microversion {ref_microversion}")
                     dxf_content = self.export_face_to_dxf(
                         document_id, workspace_id, element_id,
                         face_id=face_id,
                         body_id=None,
                         face_normal=None,
-                        microversion_id=ref_microversion,
+                        microversion_id=mv,
                         allow_fallbacks=False
                     )
-                    if dxf_content:
-                        used_microversion = ref_microversion
-                        break
                 except Exception as direct_error:
-                    log(f"⚠️  Direct selected-face export failed for {face_id} at {ref_microversion or 'workspace'}: {direct_error}")
+                    log(f"⚠️  Direct selected-face export failed for {face_id} at {mv or 'workspace'}: {direct_error}")
+                    attempt['error'] = short(direct_error)
                     dxf_content = None
+
+                if dxf_content:
+                    attempt['success_bytes'] = len(dxf_content)
+                    break
 
             if dxf_content:
                 safe_name = f"selected_part_{index:02d}"
@@ -2088,7 +2107,6 @@ class OnshapeClient:
                     'body_id': '',
                     'part_name': safe_name,
                     'source_face_id': face_id,
-                    'source_microversion_id': used_microversion or '',
                 })
                 log(f"✅ Direct selected-face export worked for {face_id} ({len(dxf_content)} bytes)")
 
@@ -2123,23 +2141,29 @@ class OnshapeClient:
 
         try:
             faces_data = None
-            bodies_with_faces = None
-            resolver_microversion = None
-            for ref_microversion in export_refs:
-                faces_data = self.list_faces(document_id, workspace_id, element_id, microversion_id=ref_microversion)
-                if not faces_data:
-                    continue
-                bodies_with_faces = self.get_body_faces(
-                    document_id, workspace_id, element_id,
-                    cached_faces_data=faces_data,
-                    microversion_id=ref_microversion
-                )
-                if bodies_with_faces:
-                    resolver_microversion = ref_microversion
+            faces_microversion_used = None
+            for mv in microversion_ids + [None]:
+                attempt = {
+                    'microversion_id': mv,
+                    'endpoint_kind': 'microversion' if mv else 'workspace'
+                }
+                self.last_selected_export_debug['bodydetails_attempts'].append(attempt)
+                candidate_faces_data = self.list_faces(document_id, workspace_id, element_id, microversion_id=mv)
+                body_count = len(candidate_faces_data.get('bodies', [])) if isinstance(candidate_faces_data, dict) else 0
+                attempt['body_count'] = body_count
+                if candidate_faces_data and body_count > 0:
+                    faces_data = candidate_faces_data
+                    faces_microversion_used = mv
                     break
             if not faces_data:
-                log("❌ list_faces returned None – cannot resolve selected faces/bodies")
+                log("❌ list_faces returned no bodies – cannot resolve selected faces/bodies")
                 return []
+
+            bodies_with_faces = self.get_body_faces(
+                document_id, workspace_id, element_id,
+                cached_faces_data=faces_data,
+                microversion_id=faces_microversion_used
+            )
             if not bodies_with_faces:
                 log("❌ get_body_faces returned None – cannot resolve selected bodies")
                 return []
@@ -2149,6 +2173,17 @@ class OnshapeClient:
             return []
 
         selected_by_body = {}
+        self.last_selected_export_debug['available_body_ids'] = list(bodies_with_faces.keys())[:50]
+        sample_faces_for_debug = []
+        for dbg_bid, dbg_body in bodies_with_faces.items():
+            for dbg_face in dbg_body.get('faces', [])[:5]:
+                if dbg_face.get('id'):
+                    sample_faces_for_debug.append(f"{dbg_bid}:{dbg_face.get('id')}")
+                if len(sample_faces_for_debug) >= 50:
+                    break
+            if len(sample_faces_for_debug) >= 50:
+                break
+        self.last_selected_export_debug['available_face_samples'] = sample_faces_for_debug
 
         def add_body_selection(bid, body_data, face=None, reason='selected body'):
             if bid in selected_by_body:
@@ -2160,6 +2195,9 @@ class OnshapeClient:
             if not ref_face:
                 log(f"⚠️  Body {bid} has no usable faces; skipping")
                 return
+            self.last_selected_export_debug['matched_body_ids'].append(bid)
+            if ref_face and ref_face.get('id'):
+                self.last_selected_export_debug['matched_face_ids'].append(ref_face.get('id'))
             selected_by_body[bid] = {
                 'body_id': bid,
                 'part_name': body_data.get('name', 'Part'),
@@ -2226,7 +2264,7 @@ class OnshapeClient:
                         face_id=face_id,
                         body_id=bid,
                         face_normal=face_normal,
-                        microversion_id=resolver_microversion,
+                        microversion_id=faces_microversion_used,
                         allow_fallbacks=False
                     )
                 except Exception as face_error:
@@ -2345,7 +2383,9 @@ class OnshapeClient:
                         document_id, workspace_id, element_id,
                         face_id=face_id,
                         body_id=bid,
-                        face_normal=face_normal
+                        face_normal=face_normal,
+                        microversion_id=faces_microversion_used,
+                        allow_fallbacks=False
                     )
 
                 if not dxf_content:
