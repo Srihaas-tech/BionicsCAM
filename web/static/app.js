@@ -1276,7 +1276,21 @@ document.addEventListener('DOMContentLoaded', () => {
                         geometry: parsed?.geometry,
                         bounds: visualBounds
                     };
+                }).filter(part => {
+                    const ok = part.geometry && Array.isArray(part.geometry.entities) &&
+                        part.geometry.entities.length > 0 && part.bounds &&
+                        Number.isFinite(part.bounds.width) && Number.isFinite(part.bounds.height) &&
+                        part.bounds.width > 0 && part.bounds.height > 0;
+                    if (!ok) {
+                        console.warn('Skipping DXF in setup preview because no valid preview geometry was found:', part.name);
+                    }
+                    return ok;
                 });
+
+                if (parts.length === 0) {
+                    throw new Error('No valid DXF geometry was found for the setup preview.');
+                }
+
                 buildCompositePreview(parts);
             } catch (error) {
                 console.error('Failed to build multi-DXF setup preview:', error);
@@ -1596,24 +1610,35 @@ document.addEventListener('DOMContentLoaded', () => {
             // Organize entities by layer and parse Z depths (reuse existing function)
             const layerData = organizeDxfLayers(entities);
 
-            dxfGeometry = {
+            const parsedGeometry = {
                 minX, maxX, minY, maxY,
                 entities: entities,
                 layers: layerData.layers,
                 layerOrder: layerData.layerOrder
             };
-            dxfBounds = {
+            const parsedBounds = {
+                minX, maxX, minY, maxY,
                 width: maxX - minX,
                 height: maxY - minY,
                 centerX: (minX + maxX) / 2,
                 centerY: (minY + maxY) / 2
             };
 
+            dxfGeometry = parsedGeometry;
+            dxfBounds = parsedBounds;
+
             // Update form visibility based on detected layers (2D vs 2.5D)
             updateFormVisibility();
 
             document.getElementById('modeToggle').style.display = 'flex';
             switchMode('setup');
+
+            // IMPORTANT: multi-DXF preview reuses this parser. Return the parsed
+            // data so callers do not have to scrape globals after each file.
+            return {
+                geometry: parsedGeometry,
+                bounds: parsedBounds
+            };
         }
         
         function createEntity(type, data) {
