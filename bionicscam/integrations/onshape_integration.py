@@ -55,7 +55,7 @@ class OnshapeClient:
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
         # Try to load from file first
-        config_file = 'onshape_config.json'
+        config_file = Path(__file__).resolve().parents[2] / 'config' / 'onshape_config.json'
         config = {}
         
         if os.path.exists(config_file):
