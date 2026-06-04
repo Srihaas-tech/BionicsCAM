@@ -26,7 +26,7 @@ from shapely.geometry import Point, Polygon, LineString, LinearRing, MultiPolygo
 from shapely.ops import unary_union, linemerge
 
 # Local modules
-from team_config import TeamConfig
+from bionicscam.team_config import TeamConfig
 
 
 @dataclass
