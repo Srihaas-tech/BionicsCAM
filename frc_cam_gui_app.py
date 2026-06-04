@@ -22,6 +22,8 @@ import secrets
 import re
 import uuid
 
+AUTO_NEST_CLEARANCE_INCHES = 0.125  # 1/8 inch clearance between auto-nested parts
+
 # Upstash Redis for job history
 try:
     from upstash_redis import Redis as UpstashRedis
@@ -139,6 +141,8 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
         end = next((i for i, l in enumerate(lines)
                     if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
         return '\n'.join(lines[start:end])
+
+    parts = sorted(parts, key=lambda p: max(float(p.get('part_w', 0) or 0), float(p.get('part_h', 0) or 0)) * min(float(p.get('part_w', 0) or 0), float(p.get('part_h', 0) or 0)), reverse=True)
 
     placements = []
     x_cursor = 0.0
@@ -555,6 +559,31 @@ def generate_onshape_filename(doc_name, part_name):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return f"Onshape_Part_{timestamp}"
 
+def get_deployed_commit_sha():
+    '''Return the deployed commit SHA if available.'''
+    for env_name in ("VERCEL_GIT_COMMIT_SHA", "GITHUB_SHA", "COMMIT_SHA"):
+        sha = os.environ.get(env_name)
+        if sha:
+            sha = sha.strip()
+            if sha:
+                return sha
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        sha = result.stdout.strip()
+        if sha:
+            return sha
+    except Exception:
+        pass
+
+    return None
+
 # ============================================================================
 # Routes
 # ============================================================================
@@ -833,7 +862,7 @@ def process_file():
                         result = standard_parts[0]['result']
                         stock_x = standard_parts[0]['pp'].config.machine_x_max
                         stock_y = standard_parts[0]['pp'].config.machine_y_max
-                        gap = tool_diameter
+                        gap = AUTO_NEST_CLEARANCE_INCHES  # Small clearance between auto-nested parts
 
                         try:
                             combined_gcode, placements, used_w, used_h = combine_multi_dxf_results(
@@ -1541,6 +1570,18 @@ def set_machine():
         log(f"Error setting machine: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/build-info')
+@limiter.limit("30 per minute")
+def api_build_info():
+    '''Return the commit SHA of the currently deployed build.'''
+    sha = get_deployed_commit_sha()
+    return jsonify({
+        'commitSha': sha,
+        'shortSha': sha[:7] if sha else None,
+        'deployedAt': os.environ.get('VERCEL_DEPLOYMENT_CREATED_AT') or os.environ.get('BUILD_TIME'),
+        'platform': 'vercel' if os.environ.get('VERCEL') == '1' else 'local',
+    })
+
 @app.route('/debug/session')
 @limiter.limit("30 per minute")
 def debug_session():
@@ -1778,11 +1819,29 @@ def onshape_import():
         # ?multi=true → export every body as its own DXF; skip single-part flow.
         multi_parts = raw_params.get('multi', 'false').lower() in ('true', '1', 'yes')
         if multi_parts:
-            log("\U0001f5c2\ufe0f  Multi-part import requested – exporting all bodies as separate DXFs")
-            part_exports = client.export_all_parts_as_dxfs(document_id, workspace_id, element_id)
+            multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
+            selected_face_ids_raw = raw_params.get('faceIds', '').strip()
+            selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
+
+            if selected_face_ids:
+                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+                part_exports = client.export_selected_faces_as_dxfs(
+                    document_id, workspace_id, element_id,
+                    selected_face_ids,
+                    multilayer=multilayer_for_multi
+                )
+                empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
+            else:
+                log("❌ Multi-part import requested but no selected face IDs were provided; refusing to export the entire Part Studio")
+                return jsonify({
+                    'error': 'No Onshape faces were selected for multi-part import. Select one flat face per part, then import again.'
+                }), 400
 
             if not part_exports:
-                return jsonify({'error': 'No parts could be exported from this document'}), 500
+                return jsonify({
+                    'error': 'No parts could be exported from this document',
+                    'message': empty_message
+                }), 500
 
             dxf_files_inline = []
             for part in part_exports:
@@ -1815,7 +1874,7 @@ def onshape_import():
                                  dxf_file='', dxf_content_inline=None,
                                  dxf_files_inline=dxf_files_inline,
                                  from_onshape=True, document_id=document_id,
-                                 face_id='', suggested_filename='', detected_thickness=None,
+                                 face_id='', suggested_filename='Onshape_selected_import' if selected_face_ids else 'Onshape_multi_import', detected_thickness=None,
                                  user_name=session.get('user_name'), team_name=session.get('team_name'),
                                  drive_enabled=drive_enabled, machine_x_max=machine_x_max,
                                  machine_y_max=machine_y_max, default_tool_diameter=default_tool_diameter,

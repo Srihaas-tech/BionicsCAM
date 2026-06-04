@@ -4,14 +4,15 @@
     // State
     let selectedFaceId = null;
     let selectedPartId = null;
-    let currentSelection = null;  // Full selection object for highlighting
+    let currentSelection = null;
+    let selectedSelections = [];
     let selectionRequestCounter = 0;
     let isWaitingForSelection = false;
 
     // DOM elements
     const instruction = document.getElementById('instruction');
     const buttonGroup = document.getElementById('buttonGroup');
-    const sendBtn = document.getElementById('sendToBionicsCAM');
+    const sendBtn = document.getElementById('sendToBionicsCAM'); // Optional now
     const selectAnotherBtn = document.getElementById('selectAnotherFace');
     const multilayerCheckbox = document.getElementById('multilayerMode');
     const multiPartGroup = document.getElementById('multiPartGroup');
@@ -19,17 +20,16 @@
     const mode2DLabel = document.getElementById('mode2DLabel');
     const mode25DLabel = document.getElementById('mode25DLabel');
     const modeHint = document.getElementById('modeHint');
+    const multiPartGroup = document.getElementById('multiPartGroup');
+    const importAllPartsBtn = document.getElementById('importAllParts');
 
     // Onshape context from template
     const context = window.ONSHAPE_CONTEXT;
 
-    /**
-     * Request a face selection from Onshape
-     * This is called on initialization and after "Send to BionicsCAM"
-     */
     function requestFaceSelection() {
         selectionRequestCounter++;
         isWaitingForSelection = true;
+
         const selectionMessage = {
             messageName: 'requestSelection',
             messageId: 'bionicscam-selection-' + selectionRequestCounter,
@@ -37,22 +37,18 @@
             workspaceId: context.workspaceId,
             elementId: context.elementId,
             filterType: 'simple',
-            entityTypeSpecifier: ['FACE'],      // Only faces
-            bodyTypeSpecifier: ['SOLID'],       // Only from solid bodies (not drawings)
-            requiredSelectionCount: 1           // Exactly one face
+            entityTypeSpecifier: ['FACE'],
+            bodyTypeSpecifier: ['SOLID'],
+            requiredSelectionCount: 1
         };
+
         window.parent.postMessage(selectionMessage, '*');
         console.log('Requested face selection:', selectionMessage);
     }
 
-    /**
-     * Initialize the extension
-     * Send applicationInit message to Onshape
-     */
     function initialize() {
         console.log('BionicsCAM panel initializing...', context);
 
-        // Send initialization message to Onshape
         const initMessage = {
             messageName: 'applicationInit',
             documentId: context.documentId,
@@ -63,61 +59,56 @@
         window.parent.postMessage(initMessage, '*');
         console.log('Sent applicationInit:', initMessage);
 
-        // Listen for messages from Onshape
         window.addEventListener('message', handleMessage);
 
-        // Request initial face selection
-        // This will be called again after each successful selection
         requestFaceSelection();
 
-        // Set up button handlers
-        sendBtn.addEventListener('click', handleSendToBionicsCAM);
-        selectAnotherBtn.addEventListener('click', handleSelectAnother);
+        // Send button is optional now because it was removed from the HTML
+        if (sendBtn) {
+            sendBtn.addEventListener('click', handleSendToBionicsCAM);
+        }
+
+        if (selectAnotherBtn) {
+            selectAnotherBtn.addEventListener('click', handleSelectAnother);
+        }
+
+        if (importAllPartsBtn) {
+            importAllPartsBtn.addEventListener('click', handleImportAllParts);
+        }
 
         // Set up mode checkbox handler
         multilayerCheckbox.addEventListener('change', updateModeInstructions);
 
-        // Set up multi-part import button
-        importAllPartsBtn.addEventListener('click', handleImportAllParts);
-
-        // Initialize mode instructions
         updateModeInstructions();
     }
 
-    /**
-     * Update instruction text based on multilayer mode
-     */
     function updateModeInstructions() {
-        const isMultilayer = multilayerCheckbox.checked;
+        const isMultilayer = multilayerCheckbox && multilayerCheckbox.checked;
 
         if (isMultilayer) {
-            // 2.5D mode - show multi-part button + face selection
+            // 2.5D mode - stock must match CAD
             mode2DLabel.classList.remove('active');
             mode25DLabel.classList.add('active');
             modeHint.textContent = 'Stock thickness must match CAD part thickness';
-            multiPartGroup.style.display = 'flex';
+            // Update instruction if no face selected
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Or select a face at the <strong>top-most layer</strong> for a single part';
+                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture';
                 instruction.style.color = '';
             }
         } else {
-            // 2D mode - hide multi-part button
+            // 2D mode - any stock works
             mode2DLabel.classList.add('active');
             mode25DLabel.classList.remove('active');
             modeHint.textContent = 'Any stock thickness works - cutting a flat pattern only';
-            multiPartGroup.style.display = 'none';
+            // Update instruction if no face selected
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture';
+                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture, then import the selected part(s)';
                 instruction.style.color = '';
             }
         }
     }
 
-    /**
-     * Handle incoming messages from Onshape parent window
-     */
     function handleMessage(event) {
-        // Validate origin for security
         if (!event.origin.includes('onshape.com')) {
             console.warn('Message from invalid origin:', event.origin);
             return;
@@ -129,88 +120,125 @@
         if (data.messageName === 'REQUESTED_SELECTION') {
             handleRequestedSelection(data);
         } else if (data.messageName === 'SELECTION') {
-            // Generic selection messages can indicate timeout
             handleGenericSelection(data);
         }
     }
 
-    /**
-     * Handle generic SELECTION messages
-     */
+    function extractFaceSelections(selections) {
+        return (selections || []).filter(sel => {
+            const entityType = String(sel.entityType || sel.selectionType || '').toUpperCase();
+            const id = sel.selectionId || sel.faceId || sel.id;
+            return !!id && (entityType.includes('FACE') || entityType.includes('ENTITY') || !entityType);
+        });
+    }
+
+    function setCurrentSelections(selections) {
+        const faceSelections = extractFaceSelections(selections);
+
+        if (!faceSelections.length) {
+            return false;
+        }
+
+        selectedSelections = faceSelections;
+
+        const first = faceSelections[0];
+        selectedFaceId = first.selectionId || first.faceId || first.id || null;
+        selectedPartId = first.partId || first.bodyId || null;
+        currentSelection = first;
+        isWaitingForSelection = false;
+
+        const countText = faceSelections.length === 1 ? '1 face' : `${faceSelections.length} faces`;
+
+        instruction.innerHTML =
+            `✓ Onshape selection detected: <strong>${countText}</strong>` +
+            (selectedFaceId ? ` <span style="opacity:.75">(${selectedFaceId})</span>` : '');
+
+        instruction.style.color = '#27ae60';
+        instruction.style.display = 'block';
+
+        if (buttonGroup) {
+            buttonGroup.style.display = 'flex';
+        }
+
+        if (sendBtn) {
+            sendBtn.disabled = !selectedFaceId;
+        }
+
+        updateModeInstructions();
+
+        console.log('✓ Face selection list:', selectedSelections);
+        return true;
+    }
+
+    function getSelectedFaceIds() {
+        const ids = [];
+
+        for (const sel of selectedSelections) {
+            const id = sel.selectionId || sel.faceId || sel.id;
+
+            if (id && !ids.includes(id)) {
+                ids.push(id);
+            }
+        }
+
+        return ids;
+    }
+
     function handleGenericSelection(data) {
         const selections = data.selections || [];
 
         if (selections.length > 0) {
-            // User selected something - treat it as a valid face selection
-            const faceSelection = selections[0];
-            selectedFaceId = faceSelection.selectionId || faceSelection.faceId || faceSelection.id || 'selected';
-            selectedPartId = faceSelection.partId || null;
-            currentSelection = faceSelection;
-            isWaitingForSelection = false;
-
-            instruction.innerHTML = '✓ Onshape faceId selected: <strong>' + selectedFaceId + '</strong>';
-            instruction.style.color = '#27ae60';
-            instruction.style.display = 'block';
-            buttonGroup.style.display = 'flex';
-            sendBtn.disabled = false;
-
-            console.log('✓ Face selected via SELECTION:', selectedFaceId, 'Part:', selectedPartId);
+            setCurrentSelections(selections);
         } else if (isWaitingForSelection && selections.length === 0) {
-            // Selection request timed out - re-issue it
             console.log('Selection request timed out, re-requesting...');
             requestFaceSelection();
         } else if (!isWaitingForSelection && currentSelection) {
-            // User deselected - clear and re-request
             console.log('User changed selection, requesting new face selection...');
+
             selectedFaceId = null;
             selectedPartId = null;
             currentSelection = null;
-            buttonGroup.style.display = 'none';
-            sendBtn.disabled = true;
+            selectedSelections = [];
+
+            if (buttonGroup) {
+                buttonGroup.style.display = 'none';
+            }
+
+            if (sendBtn) {
+                sendBtn.disabled = true;
+            }
+
             requestFaceSelection();
         }
     }
 
-    /**
-     * Handle requested selection response from Onshape
-     */
     function handleRequestedSelection(data) {
         const selections = data.selections || [];
         const status = data.status || {};
+
         console.log('Requested selection response:', selections, 'Status:', status);
 
-        // Check status code
         if (status.statusCode === 'SUCCESS' && selections.length > 0) {
-            // User successfully selected a face (with filters enforced by Onshape)
-            const faceSelection = selections[0];
-
-            selectedFaceId = faceSelection.selectionId;
-            selectedPartId = faceSelection.partId || null;
-            currentSelection = faceSelection;
-            isWaitingForSelection = false;
-
-            // Update UI - show selected face info and buttons
-            instruction.innerHTML = '✓ Onshape faceId selected: <strong>' + selectedFaceId + '</strong>';
-            instruction.style.color = '#27ae60';
-            instruction.style.display = 'block';
-            buttonGroup.style.display = 'flex';
-            sendBtn.disabled = false;
-
-            console.log('✓ Face selected:', selectedFaceId, 'Part:', selectedPartId, 'Full selection:', faceSelection);
+            setCurrentSelections(selections);
         } else if (status.statusCode === 'PENDING') {
-            // Still waiting for selection
             instruction.innerHTML = 'Select a face to manufacture';
             instruction.style.color = '';
             instruction.style.display = 'block';
-            buttonGroup.style.display = 'none';
-            sendBtn.disabled = true;
+
+            if (buttonGroup) {
+                buttonGroup.style.display = 'none';
+            }
+
+            if (sendBtn) {
+                sendBtn.disabled = true;
+            }
         }
     }
 
     /**
      * Build URL with Onshape context parameters
      */
-    function buildUrl(endpoint, { multi = false } = {}) {
+    function buildUrl(endpoint) {
         const params = new URLSearchParams({
             documentId: context.documentId,
             workspaceId: context.workspaceId,
@@ -218,21 +246,19 @@
             server: context.server
         });
 
-        if (multi) {
-            params.append('multi', 'true');
-            params.append('multilayer', 'true');
-        } else {
-            // Add face ID if selected
-            if (selectedFaceId) {
-                params.append('faceId', selectedFaceId);
-            }
-            // Add part ID if available
-            if (selectedPartId) {
-                params.append('partId', selectedPartId);
-            }
-            const isMultilayer = multilayerCheckbox.checked;
-            params.append('multilayer', isMultilayer ? 'true' : 'false');
+        // Add face ID if selected
+        if (selectedFaceId) {
+            params.append('faceId', selectedFaceId);
         }
+
+        // Add part ID if available
+        if (selectedPartId) {
+            params.append('partId', selectedPartId);
+        }
+
+        // Add multilayer mode
+        const isMultilayer = multilayerCheckbox.checked;
+        params.append('multilayer', isMultilayer ? 'true' : 'false');
 
         return `${context.baseUrl}${endpoint}?${params.toString()}`;
     }
@@ -246,39 +272,64 @@
         window.open(url, '_blank');
     }
 
-    /**
-     * Handle "Send to BionicsCAM" button
-     * Opens full BionicsCAM interface in new window and requests another selection
-     */
     function handleSendToBionicsCAM() {
         const url = buildUrl('/onshape/import');
+
         console.log('Opening BionicsCAM:', url);
 
-        // Open in new tab (without window features to make it a tab, not popup)
         window.open(url, '_blank');
 
-        // Immediately request another face selection for the next operation
-        // This creates a select-then-send workflow
         requestFaceSelection();
     }
 
-    /**
-     * Handle "Select another face" button
-     * Clears current selection and requests a new one
-     */
+    function handleImportAllParts() {
+        const isMultilayer = multilayerCheckbox && multilayerCheckbox.checked;
+        const selectedFaceIds = getSelectedFaceIds();
+
+        if (!selectedFaceIds.length) {
+            instruction.innerHTML = 'Select one or more faces first, then import the selected part(s).';
+            instruction.style.color = '#b45309';
+            instruction.style.display = 'block';
+            return;
+        }
+
+        const params = new URLSearchParams({
+            documentId: context.documentId,
+            workspaceId: context.workspaceId,
+            elementId: context.elementId,
+            server: context.server || 'https://cad.onshape.com',
+            multilayer: isMultilayer ? 'true' : 'false',
+            multi: 'true',
+            selectedOnly: 'true',
+            faceIds: selectedFaceIds.join(',')
+        });
+
+        const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
+
+        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds);
+
+        window.open(url, '_blank');
+    }
+
     function handleSelectAnother() {
         console.log('User requested to select another face');
 
-        // Clear current selection
         selectedFaceId = null;
         selectedPartId = null;
         currentSelection = null;
+        selectedSelections = [];
 
-        // Request a new selection
+        if (buttonGroup) {
+            buttonGroup.style.display = 'none';
+        }
+
+        if (sendBtn) {
+            sendBtn.disabled = true;
+        }
+
         requestFaceSelection();
     }
 
-    // Initialize when DOM is ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initialize);
     } else {

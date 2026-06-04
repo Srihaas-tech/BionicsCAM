@@ -453,7 +453,7 @@ class OnshapeClient:
                 "units": "inch",
                 "flatten": "true",  # Critical for 2D export
                 "includeBendCenterlines": "true",
-                "includeSketches": "true",
+                "includeSketches": "false",
                 "splinesAsPolylines": "true",
                 "triggerAutoDownload": "true",
                 "storeInDocument": "false",
@@ -1587,7 +1587,7 @@ class OnshapeClient:
                 "units": "inch",
                 "flatten": "true",
                 "includeBendCenterlines": "true",
-                "includeSketches": "true",
+                "includeSketches": "false",
                 "splinesAsPolylines": "true",
                 "triggerAutoDownload": "true",
                 "storeInDocument": "false",
@@ -1974,19 +1974,135 @@ class OnshapeClient:
             log(f"Error parsing Onshape URL: {e}")
             return None
 
-    def export_all_parts_as_dxfs(self, document_id, workspace_id, element_id):
+    def export_selected_faces_as_dxfs(self, document_id, workspace_id, element_id, selected_face_ids, multilayer=True):
         """
-        Export every body in a Part Studio as a separate multilayer DXF.
+        Export only the bodies that correspond to selected face IDs.
 
-        Used for multi-file 2.5D imports so each part becomes its own DXF
-        that can be nested independently on the CNC sheet.
+        This is used by the Onshape panel when the user shift/ctrl-selects
+        multiple faces and clicks Import selected parts. We de-dupe by body ID
+        so selecting two faces on the same part exports that part only once.
+
+        Returns:
+            List of dicts: [{'content': bytes, 'filename': str, 'body_id': str}, ...]
+        """
+        log(f"\n{'='*70}")
+        log(f"MULTI-PART EXPORT: selected faces -> individual DXFs ({'2.5D' if multilayer else '2D'})")
+        log(f"Selected face IDs: {selected_face_ids}")
+        log(f"{'='*70}")
+
+        if not selected_face_ids:
+            log("⚠️  No selected face IDs supplied")
+            return []
+
+        selected_face_ids = [str(fid).strip() for fid in selected_face_ids if str(fid).strip()]
+        selected_face_set = set(selected_face_ids)
+
+        faces_data = self.list_faces(document_id, workspace_id, element_id)
+        if not faces_data:
+            log("❌ list_faces returned None – cannot resolve selected faces")
+            return []
+
+        bodies_with_faces = self.get_body_faces(
+            document_id, workspace_id, element_id,
+            cached_faces_data=faces_data
+        )
+        if not bodies_with_faces:
+            log("❌ get_body_faces returned None – cannot resolve selected bodies")
+            return []
+
+        # Resolve selected face IDs to their parent body. Keep first face per body.
+        selected_by_body = {}
+        for bid, body_data in bodies_with_faces.items():
+            for face in body_data.get('faces', []):
+                fid = face.get('id')
+                if fid in selected_face_set and bid not in selected_by_body:
+                    selected_by_body[bid] = {
+                        'body_id': bid,
+                        'part_name': body_data.get('name', 'Part'),
+                        'face_id': fid,
+                        'normal': face.get('normal') or {'x': 0, 'y': 0, 'z': 1},
+                        'origin': face.get('origin') or {'x': 0, 'y': 0, 'z': 0},
+                    }
+                    log(f"✅ Selected face {fid} resolved to body {bid} ({body_data.get('name', 'Part')})")
+
+        missing = [fid for fid in selected_face_ids if not any(v['face_id'] == fid for v in selected_by_body.values())]
+        if missing:
+            log(f"⚠️  Could not resolve selected face IDs: {missing}")
+
+        if not selected_by_body:
+            log("❌ None of the selected faces resolved to solid bodies")
+            return []
+
+        results = []
+        for bid, item in selected_by_body.items():
+            part_name = item['part_name']
+            face_id = item['face_id']
+            face_normal = item['normal']
+            reference_origin = item['origin']
+            log(f"\n--- Exporting selected body {bid} ({part_name}) from face {face_id} ---")
+
+            dxf_content = None
+            if multilayer:
+                try:
+                    export_result = self.export_multilayer_dxf(
+                        document_id, workspace_id, element_id,
+                        reference_face_id=face_id,
+                        reference_body_id=bid,
+                        reference_normal=face_normal,
+                        reference_origin=reference_origin,
+                        body_id=bid,
+                        cached_faces_data=faces_data
+                    )
+                    if isinstance(export_result, tuple):
+                        dxf_content, _ = export_result
+                    else:
+                        dxf_content = export_result
+                except Exception as multilayer_error:
+                    log(f"⚠️  2.5D export failed for selected body {bid}; falling back to 2D: {multilayer_error}")
+                    dxf_content = None
+
+            if not dxf_content:
+                dxf_content = self.export_face_to_dxf(
+                    document_id, workspace_id, element_id,
+                    face_id=face_id,
+                    body_id=bid,
+                    face_normal=face_normal
+                )
+
+            if not dxf_content:
+                log(f"⚠️  DXF export returned nothing for selected body {bid} – skipping")
+                continue
+
+            safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or bid
+            results.append({
+                'content': dxf_content,
+                'filename': f"{safe_name}.dxf",
+                'body_id': bid,
+                'part_name': part_name,
+                'source_face_id': face_id,
+            })
+            log(f"✅ Exported selected body {bid} ({part_name}) → {safe_name}.dxf ({len(dxf_content)} bytes)")
+
+        log(f"\n{'='*70}")
+        log(f"SELECTED MULTI-PART EXPORT complete: {len(results)}/{len(selected_by_body)} selected bodies exported")
+        log(f"{'='*70}\n")
+        return results
+
+    def export_all_parts_as_dxfs(self, document_id, workspace_id, element_id, multilayer=True):
+        """
+        Export every body in a Part Studio as a separate DXF.
+
+        Used for multi-file Onshape imports so each part becomes its own DXF
+        that can be nested independently on the CNC sheet. If multilayer=True,
+        each body is exported as a layered 2.5D DXF; if that fails, it falls
+        back to a flat face DXF so one bad body does not kill the batch.
 
         Returns:
             List of dicts: [{'content': bytes, 'filename': str, 'body_id': str}, ...]
             Returns an empty list if no bodies are found or all exports fail.
         """
         log(f"\n{'='*70}")
-        log(f"MULTI-PART EXPORT: all bodies → individual DXFs")
+        log(f"MULTI-PART EXPORT: all bodies -> individual DXFs ({'2.5D' if multilayer else '2D'})")
         log(f"{'='*70}")
 
         # Fetch faces data once; reused for every body to avoid redundant API calls
@@ -2035,24 +2151,41 @@ class OnshapeClient:
                             reference_origin = surface.get('origin', reference_origin)
                             break
 
-                # Export multilayer DXF for this body only
-                export_result = self.export_multilayer_dxf(
-                    document_id, workspace_id, element_id,
-                    reference_face_id=face_id,
-                    reference_body_id=bid,
-                    reference_normal=face_normal,
-                    reference_origin=reference_origin,
-                    body_id=bid,
-                    cached_faces_data=faces_data
-                )
+                dxf_content = None
 
-                if isinstance(export_result, tuple):
-                    dxf_content, _ = export_result
-                else:
-                    dxf_content = export_result
+                if multilayer:
+                    # Export layered 2.5D DXF for this body only. If this body
+                    # has weird geometry, fall back to a flat face export so the
+                    # rest of the batch still imports.
+                    try:
+                        export_result = self.export_multilayer_dxf(
+                            document_id, workspace_id, element_id,
+                            reference_face_id=face_id,
+                            reference_body_id=bid,
+                            reference_normal=face_normal,
+                            reference_origin=reference_origin,
+                            body_id=bid,
+                            cached_faces_data=faces_data
+                        )
+
+                        if isinstance(export_result, tuple):
+                            dxf_content, _ = export_result
+                        else:
+                            dxf_content = export_result
+                    except Exception as multilayer_error:
+                        log(f"⚠️  2.5D export failed for body {bid}; falling back to 2D: {multilayer_error}")
+                        dxf_content = None
 
                 if not dxf_content:
-                    log(f"⚠️  export_multilayer_dxf returned nothing for body {bid} – skipping")
+                    dxf_content = self.export_face_to_dxf(
+                        document_id, workspace_id, element_id,
+                        face_id=face_id,
+                        body_id=bid,
+                        face_normal=face_normal
+                    )
+
+                if not dxf_content:
+                    log(f"⚠️  DXF export returned nothing for body {bid} – skipping")
                     continue
 
                 safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or bid

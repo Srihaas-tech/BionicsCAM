@@ -493,12 +493,17 @@ document.addEventListener('DOMContentLoaded', () => {
             hideError();
             hideResults();
 
-            // Read DXF file for setup mode
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                parseDxfForSetup(e.target.result);
-            };
-            reader.readAsText(file);
+            // Read DXF file(s) for setup preview. Multi-file jobs must preview
+            // every part, not just dxfFiles[0].
+            if (dxfFiles.length > 1) {
+                parseDxfFilesForSetup(dxfFiles);
+            } else {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    parseDxfForSetup(e.target.result);
+                };
+                reader.readAsText(dxfFiles[0]);
+            }
         }
 
         // Handle "Upload a different file" link
@@ -1057,7 +1062,228 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Parse DXF geometry from file using dxf-parser library
         function parseDxfForSetup(dxfContent) {
-            parseDxfManually(dxfContent);
+            return parseDxfManually(dxfContent);
+        }
+
+        function readDxfFileAsText(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result);
+                reader.onerror = () => reject(reader.error || new Error(`Failed to read ${file.name}`));
+                reader.readAsText(file);
+            });
+        }
+
+        function getPreviewStockSize() {
+            const machineXMax = Number(window.MACHINE_CONFIG?.xMax) || 48.0;
+            const machineYMax = Number(window.MACHINE_CONFIG?.yMax) || 48.0;
+            return { width: machineXMax, height: machineYMax };
+        }
+
+        function getEntityVisualBounds(entity) {
+            if (!entity) return null;
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+
+            const update = (x, y) => {
+                if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            };
+
+            if (entity.type === 'CIRCLE' && entity.center && Number.isFinite(entity.radius)) {
+                update(entity.center.x - entity.radius, entity.center.y - entity.radius);
+                update(entity.center.x + entity.radius, entity.center.y + entity.radius);
+            } else if (entity.type === 'ARC' && entity.center && Number.isFinite(entity.radius)) {
+                const b = calculateArcBounds(
+                    entity.center.x,
+                    entity.center.y,
+                    entity.radius,
+                    entity.startAngle || 0,
+                    entity.endAngle || 360
+                );
+                update(b.minX, b.minY);
+                update(b.maxX, b.maxY);
+            } else if (entity.type === 'LINE' || entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE') {
+                (entity.vertices || []).forEach(v => update(v.x, v.y));
+            } else if (entity.type === 'SPLINE') {
+                (entity.controlPoints || []).forEach(p => update(p.x, p.y));
+            }
+
+            if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY)) {
+                return null;
+            }
+            return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
+        }
+
+        function calculateGeometryVisualBounds(geometry) {
+            if (!geometry || !Array.isArray(geometry.entities)) return null;
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+
+            for (const entity of geometry.entities) {
+                const b = getEntityVisualBounds(entity);
+                if (!b) continue;
+                minX = Math.min(minX, b.minX);
+                maxX = Math.max(maxX, b.maxX);
+                minY = Math.min(minY, b.minY);
+                maxY = Math.max(maxY, b.maxY);
+            }
+
+            if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY) || maxX <= minX || maxY <= minY) {
+                return null;
+            }
+            return {
+                minX, maxX, minY, maxY,
+                width: maxX - minX,
+                height: maxY - minY,
+                centerX: (minX + maxX) / 2,
+                centerY: (minY + maxY) / 2
+            };
+        }
+
+        function transformPreviewPoint(x, y, bounds, rotated) {
+            if (rotated) {
+                return {
+                    x: y - bounds.minY,
+                    y: bounds.maxX - x
+                };
+            }
+            return {
+                x: x - bounds.minX,
+                y: y - bounds.minY
+            };
+        }
+
+        function cloneEntityForPreview(entity, bounds, rotated, offsetX, offsetY, layerName) {
+            const movePoint = (pt) => {
+                const p = transformPreviewPoint(pt.x, pt.y, bounds, rotated);
+                return { x: p.x + offsetX, y: p.y + offsetY };
+            };
+
+            if (entity.type === 'CIRCLE') {
+                return { ...entity, center: movePoint(entity.center), layer: layerName };
+            }
+            if (entity.type === 'ARC') {
+                return {
+                    ...entity,
+                    center: movePoint(entity.center),
+                    startAngle: (entity.startAngle || 0) + (rotated ? 90 : 0),
+                    endAngle: (entity.endAngle || 360) + (rotated ? 90 : 0),
+                    layer: layerName
+                };
+            }
+            if (entity.type === 'LINE' || entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE') {
+                return { ...entity, vertices: (entity.vertices || []).map(movePoint), layer: layerName };
+            }
+            if (entity.type === 'SPLINE') {
+                return { ...entity, controlPoints: (entity.controlPoints || []).map(movePoint), layer: layerName };
+            }
+            return { ...entity, layer: layerName };
+        }
+
+        function buildCompositePreview(parts) {
+            const stock = getPreviewStockSize();
+            // Auto-nest clearance between part bounding boxes.
+            // Keep this matched with AUTO_NEST_CLEARANCE_INCHES in frc_cam_gui_app.py.
+            const gap = 0.125;
+            const rotationMode = document.getElementById('nestRotation')?.value || 'auto';
+            const colors = [0xFDB515, 0x58A6FF, 0xA371F7, 0x2EA043, 0xF778BA, 0xFF7B72, 0x79C0FF, 0xD2A8FF];
+
+            const packParts = parts
+                .filter(part => part && part.geometry && part.bounds && Number.isFinite(part.bounds.width) && Number.isFinite(part.bounds.height))
+                .map((part, originalIndex) => {
+                    let rotated = false;
+                    if (rotationMode === '90') rotated = true;
+                    else if (rotationMode === 'auto') rotated = part.bounds.height > part.bounds.width;
+                    const slotW = rotated ? part.bounds.height : part.bounds.width;
+                    const slotH = rotated ? part.bounds.width : part.bounds.height;
+                    return { ...part, originalIndex, rotated, slotW, slotH, area: slotW * slotH };
+                })
+                .sort((a, b) => b.area - a.area);
+
+            const entities = [];
+            const layers = new Map();
+            const placements = [];
+            let x = 0;
+            let y = 0;
+            let rowH = 0;
+
+            for (const part of packParts) {
+                if (x > 0 && x + part.slotW > stock.width) {
+                    x = 0;
+                    y += rowH + gap;
+                    rowH = 0;
+                }
+
+                const layerName = `preview_part_${part.originalIndex + 1}`;
+                layers.set(layerName, {
+                    name: layerName,
+                    color: colors[part.originalIndex % colors.length],
+                    depth: 0,
+                    isDepthLayer: false,
+                    entities: []
+                });
+
+                for (const entity of part.geometry.entities || []) {
+                    const cloned = cloneEntityForPreview(entity, part.bounds, part.rotated, x, y, layerName);
+                    entities.push(cloned);
+                    layers.get(layerName).entities.push(cloned);
+                }
+
+                placements.push({ x, y, w: part.slotW, h: part.slotH, name: part.name, rotated: part.rotated });
+                x += part.slotW + gap;
+                rowH = Math.max(rowH, part.slotH);
+            }
+
+            dxfGeometry = {
+                minX: 0,
+                minY: 0,
+                maxX: stock.width,
+                maxY: stock.height,
+                entities,
+                layers,
+                layerOrder: Array.from(layers.keys()),
+                placements,
+                isCompositePreview: true
+            };
+            dxfBounds = {
+                width: stock.width,
+                height: stock.height,
+                centerX: stock.width / 2,
+                centerY: stock.height / 2
+            };
+
+            updateFormVisibility();
+            document.getElementById('modeToggle').style.display = 'flex';
+            switchMode('setup');
+        }
+
+        async function parseDxfFilesForSetup(files) {
+            try {
+                if (!files || files.length === 0) return;
+                if (files.length === 1) {
+                    parseDxfForSetup(await readDxfFileAsText(files[0]));
+                    return;
+                }
+
+                const texts = await Promise.all(files.map(readDxfFileAsText));
+                const parts = texts.map((text, index) => {
+                    const parsed = parseDxfManually(text);
+                    const visualBounds = calculateGeometryVisualBounds(parsed?.geometry) || parsed?.bounds;
+                    return {
+                        name: files[index]?.name || `Part ${index + 1}`,
+                        geometry: parsed?.geometry,
+                        bounds: visualBounds
+                    };
+                });
+                buildCompositePreview(parts);
+            } catch (error) {
+                console.error('Failed to build multi-DXF setup preview:', error);
+                showError('Preview failed', error.message || 'Could not build setup preview for uploaded DXF files.');
+            }
         }
 
         // Extract HATCH boundary paths as LWPOLYLINE entities
@@ -1265,6 +1491,9 @@ document.addEventListener('DOMContentLoaded', () => {
             let minY = Infinity, maxY = -Infinity;
 
             function updateBounds(x, y) {
+                if (!Number.isFinite(x) || !Number.isFinite(y)) {
+                    return;
+                }
                 minX = Math.min(minX, x);
                 maxX = Math.max(maxX, x);
                 minY = Math.min(minY, y);
@@ -1360,7 +1589,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             console.log(`After bounds calculation: X=[${minX.toFixed(3)}, ${maxX.toFixed(3)}], Y=[${minY.toFixed(3)}, ${maxY.toFixed(3)}]`);
 
-            if (minX === Infinity) {
+            if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY) || maxX <= minX || maxY <= minY) {
                 console.warn('⚠️ No valid geometry found, using fallback 10×10 bounds');
                 minX = 0; maxX = 10;
                 minY = 0; maxY = 10;
@@ -1390,6 +1619,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             document.getElementById('modeToggle').style.display = 'flex';
             switchMode('setup');
+
+            return { geometry: dxfGeometry, bounds: dxfBounds };
         }
         
         function createEntity(type, data) {
@@ -1461,13 +1692,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const availHeight = height - 2 * padding;
             
             // Apply rotation to bounds for calculating display size
-            let displayWidth = dxfBounds.width;
-            let displayHeight = dxfBounds.height;
+            let displayWidth = Number(dxfBounds.width);
+            let displayHeight = Number(dxfBounds.height);
+            if (!Number.isFinite(displayWidth) || displayWidth <= 0) displayWidth = Number(window.MACHINE_CONFIG?.xMax) || 48.0;
+            if (!Number.isFinite(displayHeight) || displayHeight <= 0) displayHeight = Number(window.MACHINE_CONFIG?.yMax) || 48.0;
             if (rotationAngle === 90 || rotationAngle === 270) {
                 [displayWidth, displayHeight] = [displayHeight, displayWidth];
             }
             
             const scale = Math.min(availWidth / displayWidth, availHeight / displayHeight);
+            if (!Number.isFinite(scale) || scale <= 0) {
+                console.warn('Invalid preview scale, skipping render', { displayWidth, displayHeight, availWidth, availHeight });
+                return;
+            }
             
             // Center position (no rotation of entire canvas)
             const centerX = width / 2;
@@ -2354,10 +2591,9 @@ document.addEventListener('DOMContentLoaded', () => {
             stockMesh.renderOrder = -1; // Render stock before toolpaths
             scene.add(stockMesh);
 
-            // Render DXF geometry overlay (white lines on stock top surface)
-            if (dxfGeometry && dxfGeometry.entities) {
-                renderDxfGeometry(scene, dxfGeometry.entities, stockHeight);
-            }
+            // Do not render the DXF setup overlay in G-code preview mode.
+            // The yellow toolpath is the source of truth here; overlaying the colored/white DXF
+            // preview makes small placement differences look like collisions.
 
             // Create tool representation (endmill)
             const toolLength = Math.max(maxZ * 1.5, 1.0);
@@ -2648,6 +2884,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 appState.uploadedFile = files[0];
                 appState.suggestedFilename = null;
 
+                // Onshape multi-part import exports layered DXFs. Force 2.5D
+                // on the main page so Generate uses the multilayer path.
+                const use25dEl = document.getElementById('use25d');
+                if (use25dEl) {
+                    use25dEl.checked = true;
+                    use25dEl.dispatchEvent(new Event('change'));
+                }
+
                 const fileNameEl = document.getElementById('fileName');
                 const fileSizeEl = document.getElementById('fileSize');
                 const fileLoadedCardEl = document.getElementById('fileLoadedCard');
@@ -2655,7 +2899,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const generateBtnEl = document.getElementById('generateBtn');
 
                 const totalBytes = dxfFiles.reduce((sum, f) => sum + f.content.length, 0);
-                if (fileNameEl) fileNameEl.textContent = `${files.length} files (${dxfFiles.map(f => f.filename).join(', ')})`;
+                if (fileNameEl) fileNameEl.textContent = `${files.length} DXF file${files.length === 1 ? '' : 's'} selected`;
                 if (fileSizeEl) fileSizeEl.textContent = formatFileSize(totalBytes);
                 if (dropZoneEl) dropZoneEl.style.display = 'none';
                 if (fileLoadedCardEl) fileLoadedCardEl.style.display = 'block';
@@ -2664,8 +2908,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     generateBtnEl.textContent = '🚀 Generate Program';
                 }
 
-                // Parse first file for 2D setup preview
-                parseDxfForSetup(dxfFiles[0].content);
+                // Parse all imported files for setup preview. This keeps the preview
+                // aligned with the actual multi-part job instead of showing only one DXF.
+                parseDxfFilesForSetup(files);
 
                 const statusDiv = document.getElementById('statusMessage');
                 if (statusDiv) {

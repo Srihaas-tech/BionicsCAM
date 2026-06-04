@@ -1054,23 +1054,68 @@ class FRCPostProcessor:
             print(f"  ❌ {error_msg}")
     
     def get_part_bounds(self):
-        """Return (width, height) of the part after transform_coordinates.
-        The part sits at origin (0,0) post-transform so bounds == dimensions."""
+        """Return (width, height) of the transformed part.
+
+        This is used by the auto-nesting combiner to reserve each part's slot.
+        Keep it conservative: include every entity type that can produce visible
+        G-code. If this omits arcs/splines/layer geometry, the reserved slot can
+        be smaller than the generated yellow toolpath and neighboring parts can
+        overlap by a small amount.
+        """
         all_x = []
         all_y = []
-        for circle in self.circles:
-            cx, cy = circle['center']
-            r = circle.get('radius') or (circle.get('diameter', 0) / 2)
-            all_x.extend([cx - r, cx + r])
-            all_y.extend([cy - r, cy + r])
-        for line in self.lines:
-            all_x.extend([line['start'][0], line['end'][0]])
-            all_y.extend([line['start'][1], line['end'][1]])
-        for polyline in self.polylines:
-            for x, y in polyline:
+
+        def add_point(x, y):
+            try:
+                x = float(x)
+                y = float(y)
+            except (TypeError, ValueError):
+                return
+            if math.isfinite(x) and math.isfinite(y):
                 all_x.append(x)
                 all_y.append(y)
-        if not all_x:
+
+        def add_circle_bounds(circle):
+            cx, cy = circle['center']
+            r = circle.get('radius') or (circle.get('diameter', 0) / 2)
+            add_point(cx - r, cy - r)
+            add_point(cx + r, cy + r)
+
+        def add_arc_bounds(arc):
+            # Conservative bound: use the full circle radius. This may reserve a
+            # little extra space, but it prevents small auto-nest collisions.
+            cx, cy = arc['center']
+            r = arc.get('radius', 0)
+            add_point(cx - r, cy - r)
+            add_point(cx + r, cy + r)
+
+        for circle in self.circles:
+            add_circle_bounds(circle)
+
+        for line in self.lines:
+            add_point(line['start'][0], line['start'][1])
+            add_point(line['end'][0], line['end'][1])
+
+        for arc in self.arcs:
+            add_arc_bounds(arc)
+
+        for spline in self.splines:
+            for x, y in self._sample_spline(spline):
+                add_point(x, y)
+
+        for polyline in self.polylines:
+            for x, y in polyline:
+                add_point(x, y)
+
+        if self.layer_data:
+            for layer_info in self.layer_data.values():
+                for circle in layer_info.get('circles', []):
+                    add_circle_bounds(circle)
+                for polyline in layer_info.get('polylines', []):
+                    for x, y in polyline:
+                        add_point(x, y)
+
+        if not all_x or not all_y:
             return (0.0, 0.0)
         return (max(all_x) - min(all_x), max(all_y) - min(all_y))
 
@@ -2910,8 +2955,9 @@ class FRCPostProcessor:
 
         if offset_poly.is_empty or offset_poly.area < 0.001:
             center_x, center_y = self._get_polygon_center(pocket_poly)
-            error_msg = f"Pocket at approximately ({center_x:.3f}, {center_y:.3f}) is too small for {self.tool_diameter:.4f}\" tool - tool cannot fit inside with proper clearance"
-            self._add_error(error_msg)
+            warning_msg = f"Skipping tiny pocket at approximately ({center_x:.3f}, {center_y:.3f}); {self.tool_diameter:.4f}\" tool cannot fit with proper clearance"
+            print(f"  ⚠️  WARNING: {warning_msg}")
+            gcode.append(f"(WARNING: {warning_msg})")
             return gcode
 
         # Get the boundary of the offset polygon
@@ -3227,12 +3273,13 @@ class FRCPostProcessor:
 
             if min_groove_width < self.tool_diameter:
                 center_x, center_y = pocket_poly.centroid.x, pocket_poly.centroid.y
-                error_msg = (
-                    f"Groove at approximately ({center_x:.3f}, {center_y:.3f}) "
-                    f"is {min_groove_width:.4f}\" wide, which is too narrow for "
+                warning_msg = (
+                    f"Skipping narrow groove at approximately ({center_x:.3f}, {center_y:.3f}); "
+                    f"groove is {min_groove_width:.4f}\" wide and too narrow for "
                     f"{self.tool_diameter:.4f}\" tool"
                 )
-                self._add_error(error_msg)
+                print(f"  ⚠️  WARNING: {warning_msg}")
+                gcode.append(f"(WARNING: {warning_msg})")
                 return gcode
 
         # Buffer inward (negative buffer) for tool compensation
@@ -3241,8 +3288,9 @@ class FRCPostProcessor:
 
         if offset_poly.is_empty or offset_poly.area < 0.001:
             center_x, center_y = pocket_poly.centroid.x, pocket_poly.centroid.y
-            error_msg = f"Pocket at approximately ({center_x:.3f}, {center_y:.3f}) is too small for {self.tool_diameter:.4f}\" tool - tool cannot fit inside with proper clearance"
-            self._add_error(error_msg)
+            warning_msg = f"Skipping tiny pocket at approximately ({center_x:.3f}, {center_y:.3f}); {self.tool_diameter:.4f}\" tool cannot fit with proper clearance"
+            print(f"  ⚠️  WARNING: {warning_msg}")
+            gcode.append(f"(WARNING: {warning_msg})")
             return gcode
 
         # Check for circular ring - use spiral clearing instead of contour-parallel
