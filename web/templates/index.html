@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bionics - Team 4909</title>
+    <title>BionicsCAM</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/png" href="/static/bionicslogo.png">
     <script defer src="https://cdn.vercel-insights.com/v1/script.js"></script>
@@ -423,6 +423,7 @@
             dxfFile: '{{ dxf_file if dxf_file else "" }}',
             dxfContentInline: {{ (dxf_content_inline | tojson) if dxf_content_inline else 'null' }},
             dxfFiles: {{ (dxf_files_inline | tojson) if dxf_files_inline else 'null' }},
+            multilayer: {{ 'true' if onshape_multilayer is defined and onshape_multilayer else 'false' }},
             fromOnshape: {{ 'true' if from_onshape else 'false' }},
             suggestedFilename: '{{ suggested_filename if suggested_filename else "" }}',
             usingDefaultConfig: {{ 'true' if using_default_config else 'false' }},
