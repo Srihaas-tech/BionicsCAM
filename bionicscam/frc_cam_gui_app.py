@@ -1792,29 +1792,28 @@ def onshape_import():
             multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
             selected_face_ids_raw = raw_params.get('faceIds', '').strip()
             selected_body_ids_raw = raw_params.get('bodyIds', '').strip()
-            selection_json_raw = raw_params.get('selectionJson', '').strip()
+            selection_records_raw = raw_params.get('selectionRecords', '').strip()
             selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
             selected_body_ids = [bid.strip() for bid in selected_body_ids_raw.split(',') if bid.strip()]
-            selection_metadata = []
-
-            if selection_json_raw:
+            selected_records = []
+            if selection_records_raw:
                 try:
-                    parsed_selection_metadata = json.loads(selection_json_raw)
-                    if isinstance(parsed_selection_metadata, list):
-                        selection_metadata = parsed_selection_metadata
-                    elif isinstance(parsed_selection_metadata, dict):
-                        selection_metadata = [parsed_selection_metadata]
+                    parsed_selection_records = json.loads(selection_records_raw)
+                    if isinstance(parsed_selection_records, list):
+                        selected_records = parsed_selection_records
+                    elif isinstance(parsed_selection_records, dict):
+                        selected_records = [parsed_selection_records]
                 except Exception as selection_parse_error:
-                    log(f"⚠️  Could not parse selectionJson from Onshape panel: {selection_parse_error}")
+                    log(f"⚠️ Could not parse Onshape selectionRecords JSON: {selection_parse_error}")
 
-            if selected_face_ids or selected_body_ids or selection_metadata:
-                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s), {len(selected_body_ids)} selected body id(s), {len(selection_metadata)} raw selection record(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+            if selected_face_ids or selected_body_ids or selected_records:
+                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s), {len(selected_body_ids)} selected body id(s), {len(selected_records)} raw selection record(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
                 try:
                     part_exports = client.export_selected_faces_as_dxfs(
                         document_id, workspace_id, element_id,
                         selected_face_ids,
                         selected_body_ids=selected_body_ids,
-                        selection_metadata=selection_metadata,
+                        selected_records=selected_records,
                         multilayer=multilayer_for_multi
                     )
                 except Exception as selected_export_error:
@@ -1829,9 +1828,8 @@ def onshape_import():
                 empty_message = (
                     'BionicsCAM could not resolve/export the selected Onshape faces. '
                     f'Received {len(selected_face_ids)} face id(s), {len(selected_body_ids)} body id(s), '
-                    f'and {len(selection_metadata)} raw selection record(s). '
-                    'Try selecting one large flat face per part, then click Import selected parts again. '
-                    'If this keeps happening, send the server log lines beginning with Selected face IDs/raw paths and Selected metadata sample.'
+                    f'and {len(selected_records)} raw selection record(s). '
+                    'Copy the debug object from this response and send it back; it shows the selected IDs and available Onshape body/face IDs.'
                 )
             else:
                 log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
@@ -1842,10 +1840,25 @@ def onshape_import():
                 empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
 
             if not part_exports:
-                return jsonify({
+                debug_info = None
+                if selected_face_ids or selected_body_ids or selected_records:
+                    try:
+                        debug_info = client.debug_selected_entity_resolution(
+                            document_id, workspace_id, element_id,
+                            selected_face_ids=selected_face_ids,
+                            selected_body_ids=selected_body_ids,
+                            selected_records=selected_records
+                        )
+                    except Exception as debug_error:
+                        debug_info = {'debug_error': str(debug_error)}
+
+                response_payload = {
                     'error': 'No parts could be exported from this document',
                     'message': empty_message
-                }), 500
+                }
+                if debug_info is not None:
+                    response_payload['debug'] = debug_info
+                return jsonify(response_payload), 500
 
             dxf_files_inline = []
             for part in part_exports:
