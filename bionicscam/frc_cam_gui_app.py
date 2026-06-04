@@ -211,7 +211,7 @@ from datetime import datetime
 from urllib.parse import urlencode
 import ezdxf
 import logging
-import metrics
+from bionicscam import metrics
 
 # Configure logging for Vercel
 logging.basicConfig(
