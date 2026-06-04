@@ -1080,6 +1080,70 @@ document.addEventListener('DOMContentLoaded', () => {
             return { width: machineXMax, height: machineYMax };
         }
 
+        function getEntityVisualBounds(entity) {
+            if (!entity) return null;
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+
+            const update = (x, y) => {
+                if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            };
+
+            if (entity.type === 'CIRCLE' && entity.center && Number.isFinite(entity.radius)) {
+                update(entity.center.x - entity.radius, entity.center.y - entity.radius);
+                update(entity.center.x + entity.radius, entity.center.y + entity.radius);
+            } else if (entity.type === 'ARC' && entity.center && Number.isFinite(entity.radius)) {
+                const b = calculateArcBounds(
+                    entity.center.x,
+                    entity.center.y,
+                    entity.radius,
+                    entity.startAngle || 0,
+                    entity.endAngle || 360
+                );
+                update(b.minX, b.minY);
+                update(b.maxX, b.maxY);
+            } else if (entity.type === 'LINE' || entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE') {
+                (entity.vertices || []).forEach(v => update(v.x, v.y));
+            } else if (entity.type === 'SPLINE') {
+                (entity.controlPoints || []).forEach(p => update(p.x, p.y));
+            }
+
+            if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY)) {
+                return null;
+            }
+            return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
+        }
+
+        function calculateGeometryVisualBounds(geometry) {
+            if (!geometry || !Array.isArray(geometry.entities)) return null;
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+
+            for (const entity of geometry.entities) {
+                const b = getEntityVisualBounds(entity);
+                if (!b) continue;
+                minX = Math.min(minX, b.minX);
+                maxX = Math.max(maxX, b.maxX);
+                minY = Math.min(minY, b.minY);
+                maxY = Math.max(maxY, b.maxY);
+            }
+
+            if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY) || maxX <= minX || maxY <= minY) {
+                return null;
+            }
+            return {
+                minX, maxX, minY, maxY,
+                width: maxX - minX,
+                height: maxY - minY,
+                centerX: (minX + maxX) / 2,
+                centerY: (minY + maxY) / 2
+            };
+        }
+
         function transformPreviewPoint(x, y, bounds, rotated) {
             if (rotated) {
                 return {
@@ -1122,7 +1186,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         function buildCompositePreview(parts) {
             const stock = getPreviewStockSize();
-            const gap = 0.0; // V1 auto-nest: press bounding boxes against each other
+            const gap = Math.max(Number(document.getElementById('toolDiameter')?.value) || 0, 0);
             const rotationMode = document.getElementById('nestRotation')?.value || 'auto';
             const colors = [0xFDB515, 0x58A6FF, 0xA371F7, 0x2EA043, 0xF778BA, 0xFF7B72, 0x79C0FF, 0xD2A8FF];
 
@@ -1131,7 +1195,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 .map((part, originalIndex) => {
                     let rotated = false;
                     if (rotationMode === '90') rotated = true;
-                    else if (rotationMode === 'auto') rotated = part.bounds.height < part.bounds.width; // Match backend: rotate wide parts to reduce row width
+                    else if (rotationMode === 'auto') rotated = part.bounds.height > part.bounds.width;
                     const slotW = rotated ? part.bounds.height : part.bounds.width;
                     const slotH = rotated ? part.bounds.width : part.bounds.height;
                     return { ...part, originalIndex, rotated, slotW, slotH, area: slotW * slotH };
@@ -1162,7 +1226,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
 
                 for (const entity of part.geometry.entities || []) {
-                    const cloned = cloneEntityForPreview(entity, part.geometry, part.rotated, x, y, layerName);
+                    const cloned = cloneEntityForPreview(entity, part.bounds, part.rotated, x, y, layerName);
                     entities.push(cloned);
                     layers.get(layerName).entities.push(cloned);
                 }
@@ -1206,10 +1270,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const texts = await Promise.all(files.map(readDxfFileAsText));
                 const parts = texts.map((text, index) => {
                     const parsed = parseDxfManually(text);
+                    const visualBounds = calculateGeometryVisualBounds(parsed?.geometry) || parsed?.bounds;
                     return {
                         name: files[index]?.name || `Part ${index + 1}`,
                         geometry: parsed?.geometry,
-                        bounds: parsed?.bounds
+                        bounds: visualBounds
                     };
                 });
                 buildCompositePreview(parts);
@@ -2524,10 +2589,10 @@ document.addEventListener('DOMContentLoaded', () => {
             stockMesh.renderOrder = -1; // Render stock before toolpaths
             scene.add(stockMesh);
 
-            // Do not render the DXF setup overlay in the G-code preview.
-            // The G-code preview should show only the actual generated toolpath so
-            // mismatches between setup DXF outlines and generated G-code do not
-            // create a confusing double-image.
+            // Render DXF geometry overlay (white lines on stock top surface)
+            if (dxfGeometry && dxfGeometry.entities) {
+                renderDxfGeometry(scene, dxfGeometry.entities, stockHeight);
+            }
 
             // Create tool representation (endmill)
             const toolLength = Math.max(maxZ * 1.5, 1.0);
