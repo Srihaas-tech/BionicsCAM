@@ -94,11 +94,13 @@
             }
 
             if (importAllPartsBtn) {
-                importAllPartsBtn.textContent = '⬆ Import selected part(s) as 2.5D';
+                importAllPartsBtn.textContent = getSelectedFaceIds().length >= 1
+                    ? '⬆ Import selected part(s) as 2.5D'
+                    : '⬆ Import all parts as 2.5D';
             }
 
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture, then import the selected part(s)';
+                instruction.innerHTML = 'Select a face at the <strong>top-most layer</strong> to manufacture, or import all parts';
                 instruction.style.color = '';
             }
         } else {
@@ -111,11 +113,13 @@
             }
 
             if (importAllPartsBtn) {
-                importAllPartsBtn.textContent = '⬆ Import selected part(s) as 2D';
+                importAllPartsBtn.textContent = getSelectedFaceIds().length >= 1
+                    ? '⬆ Import selected part(s) as 2D'
+                    : '⬆ Import all parts as 2D';
             }
 
             if (!selectedFaceId && instruction.style.display !== 'none') {
-                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture, then import the selected part(s)';
+                instruction.innerHTML = 'Select the <strong>top face</strong> to manufacture, or import all parts';
                 instruction.style.color = '';
             }
         }
@@ -145,35 +149,6 @@
         });
     }
 
-    // Onshape body IDs are short (≤4 chars, e.g. "JjG").
-    // Face IDs are long deterministic strings. Use length to tell them apart.
-    function isFaceSelection(sel) {
-        const entityType = String(sel.entityType || sel.selectionType || '').toUpperCase();
-        return entityType.includes('FACE') || entityType.includes('ENTITY') || !entityType;
-    }
-
-    function extractPartId(sel) {
-        if (sel.partId) return sel.partId;
-        if (sel.bodyId) return sel.bodyId;
-        if (sel.deterministicId && !isFaceSelection(sel)) return sel.deterministicId;
-        if (sel.part && sel.part.partId) return sel.part.partId;
-        if (sel.part && sel.part.bodyId) return sel.part.bodyId;
-        if (sel.body && sel.body.id) return sel.body.id;
-        if (sel.body && sel.body.bodyId) return sel.body.bodyId;
-        return null;
-    }
-
-    function extractFaceId(sel) {
-        if (sel.faceId) return sel.faceId;
-        if (sel.entityId && isFaceSelection(sel)) return sel.entityId;
-        // Onshape can send face selection IDs as short tokens like JPK/JjG.
-        // Do NOT reject them just because they are short; that was the bug
-        // that made multi-import arrive at the backend with zero face IDs.
-        const id = sel.selectionId || sel.id || sel.deterministicId || '';
-        if (id && isFaceSelection(sel)) return id;
-        return null;
-    }
-
     function setCurrentSelections(selections) {
         const faceSelections = extractFaceSelections(selections);
 
@@ -184,11 +159,8 @@
         selectedSelections = faceSelections;
 
         const first = faceSelections[0];
-        // Log the raw selection so we can see exactly what Onshape sends
-        console.log('Raw first selection object:', JSON.stringify(first));
-
-        selectedFaceId = extractFaceId(first);
-        selectedPartId = extractPartId(first);
+        selectedFaceId = first.selectionId || first.faceId || first.id || null;
+        selectedPartId = first.partId || first.bodyId || null;
         currentSelection = first;
         isWaitingForSelection = false;
 
@@ -217,23 +189,15 @@
 
     function getSelectedFaceIds() {
         const ids = [];
-        for (const sel of selectedSelections) {
-            const faceId = extractFaceId(sel);
-            const partId = extractPartId(sel);
-            // If we have a real face ID, use it. Otherwise send body:XYZ so
-            // the server knows to resolve the top face for that body.
-            const id = faceId || (partId ? 'body:' + partId : null);
-            if (id && !ids.includes(id)) ids.push(id);
-        }
-        return ids;
-    }
 
-    function getSelectedPartIds() {
-        const ids = [];
         for (const sel of selectedSelections) {
-            const id = extractPartId(sel);
-            if (id && !ids.includes(id)) ids.push(id);
+            const id = sel.selectionId || sel.faceId || sel.id;
+
+            if (id && !ids.includes(id)) {
+                ids.push(id);
+            }
         }
+
         return ids;
     }
 
@@ -324,33 +288,28 @@
         const isMultilayer = multilayerCheckbox && multilayerCheckbox.checked;
         const selectedFaceIds = getSelectedFaceIds();
 
-        if (!selectedFaceIds.length) {
-            instruction.innerHTML = 'Select one or more faces first, then import the selected part(s).';
-            instruction.style.color = '#b45309';
-            instruction.style.display = 'block';
-            return;
-        }
-
-        const selectedPartIds = getSelectedPartIds();
         const params = new URLSearchParams({
             documentId: context.documentId,
             workspaceId: context.workspaceId,
             elementId: context.elementId,
             server: context.server || 'https://cad.onshape.com',
             multilayer: isMultilayer ? 'true' : 'false',
-            multi: 'true',
-            selectedOnly: 'true',
-            faceIds: selectedFaceIds.join(','),
-            rawSelections: JSON.stringify(selectedSelections || [])
+            multi: 'true'
         });
-        // Also send body IDs so server can resolve face when only body ID is known
-        if (selectedPartIds.length) {
-            params.append('partIds', selectedPartIds.join(','));
+
+        if (selectedFaceIds.length >= 1) {
+            params.append('faceIds', selectedFaceIds.join(','));
+            params.append('selectedOnly', 'true');
+            try {
+                params.append('selectionRecords', JSON.stringify(selectedSelections || []));
+            } catch (err) {
+                console.warn('Could not serialize Onshape selection records:', err);
+            }
         }
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
 
-        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds, 'partIds=', selectedPartIds);
+        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds);
 
         window.open(url, '_blank');
     }
