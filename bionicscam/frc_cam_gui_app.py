@@ -1792,25 +1792,26 @@ def onshape_import():
             multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
             selected_face_ids_raw = raw_params.get('faceIds', '').strip()
             selected_body_ids_raw = raw_params.get('bodyIds', '').strip()
-            selected_records_raw = raw_params.get('selectedRecords', '').strip()
+            selection_records_raw = raw_params.get('selectionRecords', '').strip()
             selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
             selected_body_ids = [bid.strip() for bid in selected_body_ids_raw.split(',') if bid.strip()]
             selected_records = []
-            if selected_records_raw:
+            if selection_records_raw:
                 try:
-                    selected_records = json.loads(selected_records_raw)
-                except Exception as selected_records_error:
-                    log(f"⚠️ Could not parse selectedRecords JSON: {selected_records_error}")
-                    selected_records = []
+                    decoded_records = json.loads(selection_records_raw)
+                    if isinstance(decoded_records, list):
+                        selected_records = decoded_records
+                except Exception as records_error:
+                    log(f"⚠️  Could not parse selectionRecords JSON: {records_error}")
 
-            if selected_face_ids or selected_body_ids:
-                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s), {len(selected_body_ids)} selected body id(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
+            if selected_face_ids or selected_body_ids or selected_records:
+                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s), {len(selected_body_ids)} selected body id(s), {len(selected_records)} raw selection record(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
                 try:
                     part_exports = client.export_selected_faces_as_dxfs(
                         document_id, workspace_id, element_id,
                         selected_face_ids,
                         selected_body_ids=selected_body_ids,
-                        raw_selection_records=selected_records,
+                        selected_records=selected_records,
                         multilayer=multilayer_for_multi
                     )
                 except Exception as selected_export_error:
@@ -1822,11 +1823,12 @@ def onshape_import():
                         'selected_face_count': len(selected_face_ids),
                         'selected_body_count': len(selected_body_ids)
                     }), 500
+                export_debug = getattr(client, 'last_selected_export_debug', {}) or {}
                 empty_message = (
                     'BionicsCAM could not resolve/export the selected Onshape faces. '
                     f'Received {len(selected_face_ids)} face id(s), {len(selected_body_ids)} body id(s), '
-                    f'and {len(selected_records) if isinstance(selected_records, list) else 0} raw selection record(s). '
-                    'Try selecting one large flat face per part, then click Import selected parts again.'
+                    f'and {len(selected_records)} raw selection record(s). '
+                    'Copy the debug object from this response and send it back if this keeps failing.'
                 )
             else:
                 log(f"🗂️  Multi-part import requested – exporting all bodies as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
@@ -1837,10 +1839,13 @@ def onshape_import():
                 empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
 
             if not part_exports:
-                return jsonify({
+                response_payload = {
                     'error': 'No parts could be exported from this document',
                     'message': empty_message
-                }), 500
+                }
+                if 'export_debug' in locals() and export_debug:
+                    response_payload['debug'] = export_debug
+                return jsonify(response_payload), 500
 
             dxf_files_inline = []
             for part in part_exports:
