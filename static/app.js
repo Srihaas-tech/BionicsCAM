@@ -1186,7 +1186,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         function buildCompositePreview(parts) {
             const stock = getPreviewStockSize();
-            const gap = Math.max(Number(document.getElementById('toolDiameter')?.value) || 0, 0);
+            // Auto-nest clearance between part bounding boxes.
+            // Keep this matched with AUTO_NEST_CLEARANCE_INCHES in frc_cam_gui_app.py.
+            const gap = 0.125;
             const rotationMode = document.getElementById('nestRotation')?.value || 'auto';
             const colors = [0xFDB515, 0x58A6FF, 0xA371F7, 0x2EA043, 0xF778BA, 0xFF7B72, 0x79C0FF, 0xD2A8FF];
 
@@ -2589,10 +2591,9 @@ document.addEventListener('DOMContentLoaded', () => {
             stockMesh.renderOrder = -1; // Render stock before toolpaths
             scene.add(stockMesh);
 
-            // Render DXF geometry overlay (white lines on stock top surface)
-            if (dxfGeometry && dxfGeometry.entities) {
-                renderDxfGeometry(scene, dxfGeometry.entities, stockHeight);
-            }
+            // Do not render the DXF setup overlay in G-code preview mode.
+            // The yellow toolpath is the source of truth here; overlaying the colored/white DXF
+            // preview makes small placement differences look like collisions.
 
             // Create tool representation (endmill)
             const toolLength = Math.max(maxZ * 1.5, 1.0);
