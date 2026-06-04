@@ -22,6 +22,8 @@ import secrets
 import re
 import uuid
 
+AUTO_NEST_CLEARANCE_INCHES = 0.125  # 1/8 inch clearance between auto-nested parts
+
 # Upstash Redis for job history
 try:
     from upstash_redis import Redis as UpstashRedis
