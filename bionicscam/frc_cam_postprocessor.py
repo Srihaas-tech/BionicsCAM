@@ -26,7 +26,7 @@ from shapely.geometry import Point, Polygon, LineString, LinearRing, MultiPolygo
 from shapely.ops import unary_union, linemerge
 
 # Local modules
-from bionicscam.team_config import TeamConfig
+from team_config import TeamConfig
 
 
 @dataclass
@@ -156,6 +156,12 @@ class FRCPostProcessor:
         self.stepover_percentage = 0.6  # Radial stepover as fraction of tool diameter (default 60%)
 
         self.use_25d = False
+        # Safety default for FRC flat-sheet work:
+        # 2.5D DXFs from CAD can contain face/surface regions at multiple depths.
+        # Fully clearing every intermediate face turns a 2-minute contour job into
+        # a huge pocketing job. Keep depth-layer pocket machining OFF unless a
+        # future UI explicitly enables true relief/pocket machining.
+        self.machine_depth_layers_25d = False
         self.peck_drill_depth = 0.1 if units == "inch" else 2.54
         
         # Tab parameters from config
@@ -1054,68 +1060,23 @@ class FRCPostProcessor:
             print(f"  ❌ {error_msg}")
     
     def get_part_bounds(self):
-        """Return (width, height) of the transformed part.
-
-        This is used by the auto-nesting combiner to reserve each part's slot.
-        Keep it conservative: include every entity type that can produce visible
-        G-code. If this omits arcs/splines/layer geometry, the reserved slot can
-        be smaller than the generated yellow toolpath and neighboring parts can
-        overlap by a small amount.
-        """
+        """Return (width, height) of the part after transform_coordinates.
+        The part sits at origin (0,0) post-transform so bounds == dimensions."""
         all_x = []
         all_y = []
-
-        def add_point(x, y):
-            try:
-                x = float(x)
-                y = float(y)
-            except (TypeError, ValueError):
-                return
-            if math.isfinite(x) and math.isfinite(y):
-                all_x.append(x)
-                all_y.append(y)
-
-        def add_circle_bounds(circle):
+        for circle in self.circles:
             cx, cy = circle['center']
             r = circle.get('radius') or (circle.get('diameter', 0) / 2)
-            add_point(cx - r, cy - r)
-            add_point(cx + r, cy + r)
-
-        def add_arc_bounds(arc):
-            # Conservative bound: use the full circle radius. This may reserve a
-            # little extra space, but it prevents small auto-nest collisions.
-            cx, cy = arc['center']
-            r = arc.get('radius', 0)
-            add_point(cx - r, cy - r)
-            add_point(cx + r, cy + r)
-
-        for circle in self.circles:
-            add_circle_bounds(circle)
-
+            all_x.extend([cx - r, cx + r])
+            all_y.extend([cy - r, cy + r])
         for line in self.lines:
-            add_point(line['start'][0], line['start'][1])
-            add_point(line['end'][0], line['end'][1])
-
-        for arc in self.arcs:
-            add_arc_bounds(arc)
-
-        for spline in self.splines:
-            for x, y in self._sample_spline(spline):
-                add_point(x, y)
-
+            all_x.extend([line['start'][0], line['end'][0]])
+            all_y.extend([line['start'][1], line['end'][1]])
         for polyline in self.polylines:
             for x, y in polyline:
-                add_point(x, y)
-
-        if self.layer_data:
-            for layer_info in self.layer_data.values():
-                for circle in layer_info.get('circles', []):
-                    add_circle_bounds(circle)
-                for polyline in layer_info.get('polylines', []):
-                    for x, y in polyline:
-                        add_point(x, y)
-
-        if not all_x or not all_y:
+                all_x.append(x)
+                all_y.append(y)
+        if not all_x:
             return (0.0, 0.0)
         return (max(all_x) - min(all_x), max(all_y) - min(all_y))
 
@@ -1509,23 +1470,12 @@ class FRCPostProcessor:
                 errors=self.errors.copy()
             )
 
-        # If 2.5D mode is explicitly requested on a single-layer DXF,
-        # synthesize layer_data from the loaded geometry using material_thickness as depth.
-        # This gives the 2.5D header, arc-based holes, and pocket detection
-        # even when the DXF has no Z_ layer names.
+        # If 2.5D mode is requested on a plain single-layer DXF, DO NOT
+        # synthesize fake layer data. That made every closed construction/face
+        # outline look like a pocket, so the machine tried to clear every line.
+        # Fall back to the normal 2D path instead.
         if self.use_25d and not self.layer_data:
-            print("2.5D mode requested on single-layer DXF - synthesizing layer data from geometry")
-            polygons = self._convert_to_shapely_polygons(self.circles, self.polylines)
-            layer_name = "Z_0p000"
-            self.layer_data = {
-                layer_name: {
-                    "depth": 0.0,
-                    "polygons": polygons,
-                    "circles": [c.copy() for c in self.circles],
-                    "polylines": [p[:] for p in self.polylines],
-                }
-            }
-            print("  Synthesized layer " + repr(layer_name) + " at Z=0.000in with " + str(len(polygons)) + " polygon(s)")
+            print("2.5D requested, but DXF has no Z_ depth layers - using normal 2D contour workflow")
 
         # Auto-detect multi-layer DXF when layer data exists
         if self.layer_data:
@@ -2165,6 +2115,12 @@ class FRCPostProcessor:
                 if 0.01 < item[1]['depth'] < self.material_thickness - 0.01
             ]
 
+        machine_depth_layers = getattr(self, 'machine_depth_layers_25d', False)
+        if not machine_depth_layers and depth_layers:
+            print("\n⚠️  2.5D depth-layer pocket machining is disabled by default")
+            print("   Skipping intermediate face layers so flat-sheet parts are not fully pocket-cleared")
+            depth_layers = []
+
         print(f"\nProcessing order:")
         for i, (layer_name, layer_info) in enumerate(depth_layers, 1):
             if has_true_bottom or layer_name != bottom_layer_name:
@@ -2188,6 +2144,8 @@ class FRCPostProcessor:
         # Generate header
         gcode = self._generate_gcode_header(timestamp, is_multilayer=True)
         warnings = []
+        if not machine_depth_layers:
+            warnings.append('2.5D depth-layer pocket machining skipped; generated flat-sheet contour toolpaths only.')
 
         # Track total features across all layers
         total_holes = 0
