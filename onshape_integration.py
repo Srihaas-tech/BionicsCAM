@@ -50,10 +50,6 @@ class OnshapeClient:
         self.access_token = None
         self.refresh_token = None
         self.token_expires = None
-        # Last Onshape API limit/quota error seen during a request.
-        # Used by Flask routes to return a helpful message instead of
-        # the generic "No parts could be exported" goblin.
-        self.last_api_limit_error = None
     
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
@@ -229,28 +225,8 @@ class OnshapeClient:
         
         headers = kwargs.pop('headers', {})
         headers['Authorization'] = f'Bearer {self.access_token}'
-
-        response = requests.request(method, url, headers=headers, **kwargs)
-
-        if response.status_code in (402, 429):
-            message = None
-            try:
-                payload = response.json()
-                message = payload.get('message') or payload.get('error')
-            except Exception:
-                payload = None
-                message = response.text[:300]
-
-            self.last_api_limit_error = {
-                'status_code': response.status_code,
-                'message': message or 'Onshape API limit exceeded',
-                'method': method,
-                'endpoint': endpoint,
-                'response_preview': response.text[:500],
-            }
-            log(f"⚠️  Onshape API limit/quota error: {self.last_api_limit_error}")
-
-        return response
+        
+        return requests.request(method, url, headers=headers, **kwargs)
     
     def get_user_info(self):
         """Get information about the authenticated user"""
@@ -451,8 +427,24 @@ class OnshapeClient:
         if face_normal:
             log(f"Normal: ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
         
-        # Try the internal export endpoint that Onshape's web UI uses
-        log("\n[Method 1] Trying exportinternal endpoint (web UI method)...")
+        # Use Onshape's public translations endpoint first. The older
+        # /exportinternal call is an internal web-client endpoint and can return
+        # misleading 402 responses even when the normal Developer API counter is
+        # not exhausted.
+        log("\n[Method 1] Trying public Part Studio translations API with selected ID...")
+        selected_result = self.export_dxf_async(
+            document_id, workspace_id, element_id, part_ids=[face_id]
+        )
+        if selected_result:
+            return selected_result
+
+        if os.environ.get('ONSHAPE_ENABLE_EXPORTINTERNAL', '').lower() not in ('1', 'true', 'yes'):
+            log("Public selected DXF translation failed; skipping internal export endpoint by default")
+            return None
+
+        # Try the internal export endpoint only when explicitly enabled for
+        # debugging. Normal app traffic should stay on public API routes.
+        log("\n[Method 2] Trying exportinternal endpoint (debug fallback)...")
         endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
         
         try:
@@ -505,13 +497,13 @@ class OnshapeClient:
             log(traceback.format_exc())
         
         # Fallback: Try async translations API
-        log("\n[Method 2] Trying async translations API...")
+        log("\n[Method 3] Trying full-element async translations API...")
         result = self.export_dxf_async(document_id, workspace_id, element_id)
         if result:
             return result
         
         # Fallback: Try POST /export endpoint
-        log("\n[Method 3] Trying POST /export endpoint...")
+        log("\n[Method 4] Trying POST /export endpoint...")
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/export"
         
         try:
@@ -556,46 +548,66 @@ class OnshapeClient:
             log(f"Error: {e}")
             return None
     
-    def start_dxf_translation(self, document_id, workspace_id, element_id):
+    def start_dxf_translation(self, document_id, workspace_id, element_id, part_ids=None):
         """
-        Start an async DXF export translation
-        
+        Start an async DXF export translation using Onshape's public
+        Part Studio translations API.
+
+        Args:
+            part_ids: Optional list/string of selected Onshape IDs. For planar
+                face exports, Onshape's DXF translator accepts the selected
+                face/part id through the partIds field.
+
         Returns:
             Translation ID if successful, None otherwise
         """
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/translations"
-        
+
         try:
             log(f"\nStarting DXF translation for element {element_id}")
             log(f"API endpoint: {self.API_BASE}{endpoint}")
-            
+
             body = {
                 "formatName": "DXF",
                 "storeInDocument": False,  # Don't store in Onshape, just export
-                "flattenAssemblies": True
+                "flattenAssemblies": True,
+                "version": "2013",
+                "units": "inch",
+                "splinesAsPolylines": True,
             }
-            
+
+            if part_ids:
+                if isinstance(part_ids, (list, tuple, set)):
+                    cleaned_ids = [str(pid).strip() for pid in part_ids if str(pid).strip()]
+                    part_ids_value = ",".join(cleaned_ids)
+                else:
+                    part_ids_value = str(part_ids).strip()
+
+                if part_ids_value:
+                    body["partIds"] = part_ids_value
+                    log(f"Selected DXF translation partIds: {part_ids_value}")
+
             log(f"Request body: {json.dumps(body, indent=2)}")
-            
+
             response = self._make_api_request('POST', endpoint, json=body)
-            
+
             log(f"Response status: {response.status_code}")
-            
+
             if response.status_code == 200:
                 data = response.json()
                 translation_id = data.get('id')
                 log(f"Translation started! ID: {translation_id}")
                 return translation_id
-            else:
-                log(f"Failed to start translation: {response.status_code}")
-                log(f"Response: {response.text}")
-                return None
-                
+
+            log(f"Failed to start translation: {response.status_code}")
+            log(f"Response: {response.text}")
+            return None
+
         except Exception as e:
             log(f"Error starting translation: {e}")
             log(traceback.format_exc())
             return None
-    
+
     def check_translation_status(self, translation_id):
         """
         Check the status of a translation
@@ -649,17 +661,22 @@ class OnshapeClient:
             log(f"Error downloading result: {e}")
             return None
     
-    def export_dxf_async(self, document_id, workspace_id, element_id, timeout=60):
+    def export_dxf_async(self, document_id, workspace_id, element_id, timeout=60, part_ids=None):
         """
-        Export DXF using async translations API
-        Polls until complete or timeout
-        
+        Export DXF using Onshape's public async translations API.
+        Polls until complete or timeout.
+
+        Args:
+            part_ids: Optional selected face/part IDs to limit the export.
+
         Returns:
             DXF content as bytes, or None
         """
         
         # Start translation
-        translation_id = self.start_dxf_translation(document_id, workspace_id, element_id)
+        translation_id = self.start_dxf_translation(
+            document_id, workspace_id, element_id, part_ids=part_ids
+        )
         if not translation_id:
             return None
         
@@ -716,7 +733,12 @@ class OnshapeClient:
             log(f"Element ID: {element_id}")
             log(f"Full endpoint: {self.API_BASE}{endpoint}")
 
-            response = self._make_api_request('GET', endpoint)
+            # includeFaces=true is required to get face data (normals, areas, IDs).
+            # rollbackBarIndex=-1 queries end-of-feature-tree state, not an intermediate one.
+            response = self._make_api_request('GET', endpoint, params={
+                'includeFaces': 'true',
+                'rollbackBarIndex': '-1',
+            })
 
             log(f"\n📡 Response status: {response.status_code}")
 
@@ -1595,6 +1617,17 @@ class OnshapeClient:
         Returns:
             DXF file content as bytes, or None if failed
         """
+        log("Using public Part Studio translations API for selected face group")
+        public_result = self.export_dxf_async(
+            document_id, workspace_id, element_id, part_ids=face_ids_str
+        )
+        if public_result:
+            return public_result
+
+        if os.environ.get('ONSHAPE_ENABLE_EXPORTINTERNAL', '').lower() not in ('1', 'true', 'yes'):
+            log("Public face-group translation failed; skipping internal export endpoint by default")
+            return None
+
         endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
 
         try:
@@ -2013,7 +2046,6 @@ class OnshapeClient:
         log(f"MULTI-PART EXPORT: selected faces -> individual DXFs ({'2.5D' if multilayer else '2D'})")
         log(f"Selected face IDs: {selected_face_ids}")
         log(f"{'='*70}")
-        self.last_api_limit_error = None
 
         if not selected_face_ids:
             log("⚠️  No selected face IDs supplied")
