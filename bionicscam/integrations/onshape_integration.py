@@ -6,7 +6,6 @@ Handles OAuth authentication and DXF export from Onshape
 import logging
 import math
 import os
-from pathlib import Path
 import re
 import sys
 import json
@@ -55,7 +54,7 @@ class OnshapeClient:
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
         # Try to load from file first
-        config_file = Path(__file__).resolve().parents[2] / 'config' / 'onshape_config.json'
+        config_file = 'onshape_config.json'
         config = {}
         
         if os.path.exists(config_file):
@@ -79,7 +78,7 @@ class OnshapeClient:
     
     def _save_config(self):
         """Save configuration"""
-        with open(Path(__file__).resolve().parents[2] / 'config' / 'onshape_config.json', 'w') as f:
+        with open('onshape_config.json', 'w') as f:
             json.dump(self.config, f, indent=2)
     
     def get_authorization_url(self, state=None):
@@ -1975,68 +1974,76 @@ class OnshapeClient:
             log(f"Error parsing Onshape URL: {e}")
             return None
 
-    def export_selected_faces_as_dxfs(self, document_id, workspace_id, element_id, selected_face_ids, selected_body_ids=None, multilayer=True):
+    def export_selected_faces_as_dxfs(self, document_id, workspace_id, element_id,
+                                      selected_face_ids, selected_body_ids=None,
+                                      multilayer=True):
         """
-        Export only the bodies that correspond to selected face IDs.
+        Export only the bodies that correspond to selected Onshape faces/bodies.
 
-        This is used by the Onshape panel when the user shift/ctrl-selects
-        multiple faces and clicks Import selected parts. We de-dupe by body ID
-        so selecting two faces on the same part exports that part only once.
-
-        Returns:
-            List of dicts: [{'content': bytes, 'filename': str, 'body_id': str}, ...]
+        Onshape's iframe selection payload is annoyingly inconsistent: sometimes
+        the selected item is a raw face ID, sometimes it is a selection-path ID
+        that contains the real topology IDs, and sometimes it includes a body or
+        occurrence ID instead. This resolver intentionally tries all safe
+        selected-ID forms, but it never falls back to exporting the whole Part
+        Studio.
         """
         log(f"\n{'='*70}")
-        log(f"MULTI-PART EXPORT: selected faces -> individual DXFs ({'2.5D' if multilayer else '2D'})")
-        log(f"Selected face IDs: {selected_face_ids}")
-        log(f"Selected body IDs: {selected_body_ids or []}")
+        log(f"MULTI-PART EXPORT: selected Onshape entities -> individual DXFs ({'2.5D' if multilayer else '2D'})")
+        log(f"Selected face IDs/raw paths: {selected_face_ids}")
+        log(f"Selected body IDs/raw paths: {selected_body_ids}")
         log(f"{'='*70}")
 
         selected_face_ids = [str(fid).strip() for fid in (selected_face_ids or []) if str(fid).strip()]
         selected_body_ids = [str(bid).strip() for bid in (selected_body_ids or []) if str(bid).strip()]
 
         if not selected_face_ids and not selected_body_ids:
-            log("⚠️  No selected face or body IDs supplied")
+            log("⚠️  No selected face/body IDs supplied")
             return []
 
-        def id_candidates(value):
-            """Return likely raw Onshape ids from a face/body selection string."""
-            raw = str(value or '').strip().strip('\"\'')
-            candidates = []
+        def id_candidates(raw_id):
+            """Return possible real Onshape IDs from a raw selection ID/path."""
+            if raw_id is None:
+                return set()
 
-            def add(candidate):
-                candidate = str(candidate or '').strip().strip('\"\'')
-                if candidate and candidate not in candidates:
-                    candidates.append(candidate)
+            text = str(raw_id).strip()
+            if not text:
+                return set()
 
-            add(raw)
-            # Onshape selectionId can be a path/prefixed token. Keep every
-            # useful segment so a browser selection like FACE:JAB/FBC can still
-            # resolve against bodydetails face id FBC.
-            normalized = raw.replace('\\', '/').replace(';', '/').replace('|', '/').replace(',', '/')
-            for chunk in normalized.split('/'):
-                add(chunk)
-                if ':' in chunk:
-                    add(chunk.split(':')[-1])
-                if '=' in chunk:
-                    add(chunk.split('=')[-1])
-            if ':' in raw:
-                add(raw.split(':')[-1])
-            if '=' in raw:
-                add(raw.split('=')[-1])
-            return candidates
+            candidates = {text}
 
-        selected_face_candidates = set()
+            # Selection paths commonly use delimiters like ',', '/', ':', ';', '|'.
+            # Keep full tokens and also strip common wrappers. Onshape topology IDs
+            # are normally compact alphanumeric J... IDs, so this is safe.
+            for token in re.split(r'[^A-Za-z0-9_\-]+', text):
+                token = token.strip()
+                if token:
+                    candidates.add(token)
+                    candidates.add(token.strip('[](){}'))
+
+            # Some selection IDs look like query-ish strings. Split equals signs too.
+            for token in re.split(r'[=]', text):
+                token = token.strip().strip('[](){}')
+                if token:
+                    candidates.add(token)
+
+            return {c for c in candidates if c}
+
+        face_candidate_set = set()
         for fid in selected_face_ids:
-            selected_face_candidates.update(id_candidates(fid))
+            face_candidate_set.update(id_candidates(fid))
 
-        selected_body_candidates = set()
+        body_candidate_set = set()
         for bid in selected_body_ids:
-            selected_body_candidates.update(id_candidates(bid))
+            body_candidate_set.update(id_candidates(bid))
+
+        # Body IDs can also be embedded inside face selection paths, so include
+        # those path tokens as possible body candidates too.
+        for fid in selected_face_ids:
+            body_candidate_set.update(id_candidates(fid))
 
         faces_data = self.list_faces(document_id, workspace_id, element_id)
         if not faces_data:
-            log("❌ list_faces returned None – cannot resolve selected faces")
+            log("❌ list_faces returned None – cannot resolve selected faces/bodies")
             return []
 
         bodies_with_faces = self.get_body_faces(
@@ -2047,56 +2054,67 @@ class OnshapeClient:
             log("❌ get_body_faces returned None – cannot resolve selected bodies")
             return []
 
-        # Resolve selected face IDs to their parent body. Keep first face per body.
+        log(f"Resolver face candidates: {sorted(face_candidate_set)}")
+        log(f"Resolver body candidates: {sorted(body_candidate_set)}")
+        log(f"Available bodies: {list(bodies_with_faces.keys())}")
+
         selected_by_body = {}
-        available_face_ids = []
-        available_body_ids = list(bodies_with_faces.keys())
 
-        for bid, body_data in bodies_with_faces.items():
-            body_matches_selection = bool(set(id_candidates(bid)) & selected_body_candidates)
+        def add_body_selection(bid, body_data, face=None, reason='selected body'):
+            if bid in selected_by_body:
+                return
+
             faces = body_data.get('faces', [])
+            ref_face = face
+            if not ref_face and faces:
+                # Largest planar/available face is the safest reference face.
+                ref_face = max(faces, key=lambda f: f.get('area', 0) or 0)
 
-            if body_matches_selection and faces and bid not in selected_by_body:
-                face = faces[0]  # faces are already sorted largest-area first
-                fid = face.get('id')
-                selected_by_body[bid] = {
-                    'body_id': bid,
-                    'part_name': body_data.get('name', 'Part'),
-                    'face_id': fid,
-                    'normal': face.get('normal') or {'x': 0, 'y': 0, 'z': 1},
-                    'origin': face.get('origin') or {'x': 0, 'y': 0, 'z': 0},
-                }
-                log(f"✅ Selected body {bid} resolved directly; using largest face {fid} ({body_data.get('name', 'Part')})")
+            if not ref_face:
+                log(f"⚠️  Body {bid} ({body_data.get('name', 'Part')}) has no usable faces; skipping")
+                return
 
-            for face in faces:
+            selected_by_body[bid] = {
+                'body_id': bid,
+                'part_name': body_data.get('name', 'Part'),
+                'face_id': ref_face.get('id'),
+                'normal': ref_face.get('normal') or {'x': 0, 'y': 0, 'z': 1},
+                'origin': ref_face.get('origin') or {'x': 0, 'y': 0, 'z': 0},
+                'reason': reason,
+            }
+            log(f"✅ {reason}: body {bid} ({body_data.get('name', 'Part')}) using face {ref_face.get('id')}")
+
+        # 1) Direct/embedded body ID resolution.
+        for bid, body_data in bodies_with_faces.items():
+            bid_candidates = id_candidates(bid)
+            if bid_candidates & body_candidate_set:
+                add_body_selection(bid, body_data, reason='selected body ID/path')
+
+        # 2) Direct/embedded face ID resolution.
+        for bid, body_data in bodies_with_faces.items():
+            for face in body_data.get('faces', []):
                 fid = face.get('id')
                 if not fid:
                     continue
-                available_face_ids.append(fid)
-                face_matches_selection = bool(set(id_candidates(fid)) & selected_face_candidates)
-                if face_matches_selection and bid not in selected_by_body:
-                    selected_by_body[bid] = {
-                        'body_id': bid,
-                        'part_name': body_data.get('name', 'Part'),
-                        'face_id': fid,
-                        'normal': face.get('normal') or {'x': 0, 'y': 0, 'z': 1},
-                        'origin': face.get('origin') or {'x': 0, 'y': 0, 'z': 0},
-                    }
-                    log(f"✅ Selected face {fid} resolved to body {bid} ({body_data.get('name', 'Part')})")
-
-        resolved_face_ids = {v['face_id'] for v in selected_by_body.values()}
-        missing = [fid for fid in selected_face_ids if not (set(id_candidates(fid)) & set(resolved_face_ids))]
-        if missing:
-            log(f"⚠️  Could not directly resolve selected face IDs: {missing}")
-
-        unresolved_body_ids = [bid for bid in selected_body_ids if not any(set(id_candidates(bid)) & set(id_candidates(resolved_bid)) for resolved_bid in selected_by_body.keys())]
-        if unresolved_body_ids:
-            log(f"⚠️  Could not directly resolve selected body IDs: {unresolved_body_ids}")
+                fid_candidates = id_candidates(fid)
+                if fid_candidates & face_candidate_set:
+                    add_body_selection(bid, body_data, face=face, reason='selected face ID/path')
 
         if not selected_by_body:
-            log("❌ None of the selected faces/bodies resolved to solid bodies")
-            log(f"Available body IDs: {available_body_ids[:20]}")
-            log(f"Available face IDs sample: {available_face_ids[:20]}")
+            sample_faces = []
+            for bid, body_data in bodies_with_faces.items():
+                for face in body_data.get('faces', [])[:3]:
+                    if face.get('id'):
+                        sample_faces.append(f"{bid}:{face.get('id')}")
+                    if len(sample_faces) >= 12:
+                        break
+                if len(sample_faces) >= 12:
+                    break
+
+            log("❌ None of the selected IDs resolved to solid bodies")
+            log(f"   Selected face raw IDs: {selected_face_ids}")
+            log(f"   Selected body raw IDs: {selected_body_ids}")
+            log(f"   Sample available body:face IDs: {sample_faces}")
             return []
 
         results = []
@@ -2105,7 +2123,7 @@ class OnshapeClient:
             face_id = item['face_id']
             face_normal = item['normal']
             reference_origin = item['origin']
-            log(f"\n--- Exporting selected body {bid} ({part_name}) from face {face_id} ---")
+            log(f"\n--- Exporting selected body {bid} ({part_name}) from face {face_id} [{item.get('reason')}] ---")
 
             dxf_content = None
             if multilayer:
