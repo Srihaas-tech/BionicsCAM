@@ -191,14 +191,33 @@
         const ids = [];
 
         for (const sel of selectedSelections) {
-            const id = sel.selectionId || sel.faceId || sel.id;
+            const entityType = String(sel.entityType || sel.selectionType || '').toUpperCase();
+            const id = sel.faceId || sel.selectionId || sel.id;
 
-            if (id && !ids.includes(id)) {
+            if (id && (entityType.includes('FACE') || entityType.includes('ENTITY') || !entityType) && !ids.includes(id)) {
                 ids.push(id);
             }
         }
 
         return ids;
+    }
+
+    function getSelectedBodyIds() {
+        const ids = [];
+
+        for (const sel of selectedSelections) {
+            const bodyId = sel.bodyId || sel.partId || sel.partIdForSelection || sel.occurrenceId;
+
+            if (bodyId && !ids.includes(bodyId)) {
+                ids.push(bodyId);
+            }
+        }
+
+        return ids;
+    }
+
+    function getRawSelectionRecords() {
+        return selectedSelections.map(sel => ({ ...sel }));
     }
 
     function handleGenericSelection(data) {
@@ -287,6 +306,8 @@
     function handleImportAllParts() {
         const isMultilayer = multilayerCheckbox && multilayerCheckbox.checked;
         const selectedFaceIds = getSelectedFaceIds();
+        const selectedBodyIds = getSelectedBodyIds();
+        const rawSelectionRecords = getRawSelectionRecords();
 
         const params = new URLSearchParams({
             documentId: context.documentId,
@@ -300,16 +321,19 @@
         if (selectedFaceIds.length >= 1) {
             params.append('faceIds', selectedFaceIds.join(','));
             params.append('selectedOnly', 'true');
-            try {
-                params.append('selectionRecords', JSON.stringify(selectedSelections || []));
-            } catch (err) {
-                console.warn('Could not serialize Onshape selection records:', err);
-            }
+        }
+
+        if (selectedBodyIds.length >= 1) {
+            params.append('bodyIds', selectedBodyIds.join(','));
+        }
+
+        if (rawSelectionRecords.length >= 1) {
+            params.append('rawSelections', JSON.stringify(rawSelectionRecords));
         }
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
 
-        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds);
+        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds, 'selectedBodyIds=', selectedBodyIds, 'rawSelections=', rawSelectionRecords);
 
         window.open(url, '_blank');
     }
