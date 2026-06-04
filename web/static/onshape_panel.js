@@ -322,15 +322,17 @@
             params.append('selectedOnly', 'true');
         }
 
-        // Keep the exact Onshape selection payload. It includes the workspace
-        // microversion where short face IDs like JPK/JjG are valid.
+        // Send the raw Onshape selection records too. Some Onshape face IDs are
+        // only valid at the selection microversion, so the backend needs the
+        // workspaceMicroversionId from these records to export the selected faces.
         if (selectedSelections.length >= 1) {
-            params.append('selectedRecords', JSON.stringify(selectedSelections));
+            params.append('selectionRecords', JSON.stringify(selectedSelections));
+            params.append('selectedOnly', 'true');
         }
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
 
-        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds, 'selectedBodyIds=', selectedBodyIds);
+        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds, 'selectedBodyIds=', selectedBodyIds, 'rawSelections=', selectedSelections);
 
         window.open(url, '_blank');
     }
