@@ -187,15 +187,64 @@
         return true;
     }
 
+    function uniquePush(ids, value) {
+        if (value === undefined || value === null) {
+            return;
+        }
+
+        const text = String(value).trim();
+        if (text && !ids.includes(text)) {
+            ids.push(text);
+        }
+    }
+
+    function collectValuesByKeyName(obj, keyMatcher, ids, depth = 0) {
+        if (!obj || depth > 5) {
+            return;
+        }
+
+        if (Array.isArray(obj)) {
+            for (const item of obj) {
+                collectValuesByKeyName(item, keyMatcher, ids, depth + 1);
+            }
+            return;
+        }
+
+        if (typeof obj !== 'object') {
+            return;
+        }
+
+        for (const [key, value] of Object.entries(obj)) {
+            const lowerKey = String(key).toLowerCase();
+
+            if (keyMatcher(lowerKey)) {
+                if (Array.isArray(value)) {
+                    value.forEach(v => uniquePush(ids, v));
+                } else if (value && typeof value === 'object') {
+                    uniquePush(ids, value.id || value.partId || value.bodyId || value.occurrenceId || value.value);
+                } else {
+                    uniquePush(ids, value);
+                }
+            }
+
+            if (value && typeof value === 'object') {
+                collectValuesByKeyName(value, keyMatcher, ids, depth + 1);
+            }
+        }
+    }
+
     function getSelectedFaceIds() {
         const ids = [];
 
         for (const sel of selectedSelections) {
-            const id = sel.faceId || sel.id || sel.selectionId;
-
-            if (id && !ids.includes(id)) {
-                ids.push(id);
-            }
+            uniquePush(ids, sel.faceId || sel.id || sel.selectionId || sel.entityId || sel.geometryId);
+            collectValuesByKeyName(sel, key => (
+                key === 'faceid' ||
+                key === 'face' ||
+                key === 'entityid' ||
+                key === 'geometryid' ||
+                key === 'selectionid'
+            ), ids);
         }
 
         return ids;
@@ -205,14 +254,28 @@
         const ids = [];
 
         for (const sel of selectedSelections) {
-            const id = sel.bodyId || sel.partId || sel.occurrenceId;
-
-            if (id && !ids.includes(id)) {
-                ids.push(id);
-            }
+            uniquePush(ids, sel.bodyId || sel.partId || sel.occurrenceId || sel.partIdWithMicroversion || sel.owningBodyId);
+            collectValuesByKeyName(sel, key => (
+                key === 'bodyid' ||
+                key === 'partid' ||
+                key === 'occurrenceid' ||
+                key === 'partidwithmicroversion' ||
+                key === 'owningbodyid' ||
+                key === 'solidid' ||
+                key === 'ownerid'
+            ), ids);
         }
 
         return ids;
+    }
+
+    function getSelectedMetadata() {
+        try {
+            return JSON.stringify(selectedSelections || []);
+        } catch (error) {
+            console.warn('Could not serialize Onshape selections:', error);
+            return '[]';
+        }
     }
 
     function handleGenericSelection(data) {
@@ -320,6 +383,10 @@
         if (selectedBodyIds.length >= 1) {
             params.append('bodyIds', selectedBodyIds.join(','));
             params.append('selectedOnly', 'true');
+        }
+
+        if (selectedFaceIds.length >= 1 || selectedBodyIds.length >= 1) {
+            params.append('selectionJson', getSelectedMetadata());
         }
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
