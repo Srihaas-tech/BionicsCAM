@@ -20,7 +20,6 @@ from pathlib import Path
 import json
 import secrets
 import re
-import math
 import uuid
 
 # Upstash Redis for job history
@@ -118,16 +117,17 @@ def process_standard_dxf_file(
 
 
 def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, timestamp_str):
-    """Place multiple independently generated parts on the sheet.
-
-    Important: placement must be based on the *generated G-code extents*, not only
-    the DXF entity bounds. Perimeter compensation can push toolpaths outside the
-    raw DXF bounding box by about the tool radius. If we pack using the raw DXF
-    bounds, neighboring parts can overlap slightly even though the preview boxes
-    look like they fit.
-    """
+    """Place multiple independently generated parts side-by-side on the sheet."""
     if not parts:
         raise ValueError('No parts to combine')
+
+    def choose_rotation(part):
+        if nest_rotation == '90':
+            return True
+        if nest_rotation == '0':
+            return False
+        # Auto: rotate if it makes the part narrower for side-by-side layout
+        return part['part_h'] < part['part_w']
 
     def extract_toolpath(gcode_str):
         lines = gcode_str.splitlines()
@@ -140,89 +140,7 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
                     if l.strip().startswith(('M30', 'M2 ', 'M02'))), len(lines))
         return '\n'.join(lines[start:end])
 
-    def gcode_xy_bounds(gcode_str):
-        """Return min/max XY from real G-code positions using modal X/Y state."""
-        coord_pat = re.compile(r'([XY])(-?\d+(?:\.\d+)?)')
-        min_x = min_y = float('inf')
-        max_x = max_y = float('-inf')
-        cur_x = cur_y = None
-        saw_xy = False
-
-        for raw_line in gcode_str.splitlines():
-            line = raw_line.split(';', 1)[0].strip()
-            if not line or line.startswith('('):
-                continue
-            found = dict((m.group(1), float(m.group(2))) for m in coord_pat.finditer(line))
-            if 'X' in found:
-                cur_x = found['X']
-            if 'Y' in found:
-                cur_y = found['Y']
-            if cur_x is None or cur_y is None or not found:
-                continue
-            if math.isfinite(cur_x) and math.isfinite(cur_y):
-                saw_xy = True
-                min_x = min(min_x, cur_x)
-                min_y = min(min_y, cur_y)
-                max_x = max(max_x, cur_x)
-                max_y = max(max_y, cur_y)
-
-        if not saw_xy:
-            return None
-        return min_x, min_y, max_x, max_y
-
-    def normalize_gcode_to_origin(gcode_str):
-        """Shift generated toolpath so its actual toolpath bounds start at X0/Y0."""
-        bounds = gcode_xy_bounds(gcode_str)
-        if not bounds:
-            return gcode_str, 0.0, 0.0
-        min_x, min_y, max_x, max_y = bounds
-        normalized = FRCPostProcessor.offset_gcode(gcode_str, dx=-min_x, dy=-min_y)
-        return normalized, max_x - min_x, max_y - min_y
-
-    def build_candidate(part, do_rotate):
-        if do_rotate:
-            raw_gcode = FRCPostProcessor.rotate_gcode_90(part['result'].gcode, part['part_w'], part['part_h'])
-            raw_slot_w, raw_slot_h = part['part_h'], part['part_w']
-            rot_label = '90°'
-        else:
-            raw_gcode = part['result'].gcode
-            raw_slot_w, raw_slot_h = part['part_w'], part['part_h']
-            rot_label = '0°'
-
-        normalized_gcode, gcode_w, gcode_h = normalize_gcode_to_origin(raw_gcode)
-
-        # Use the larger of DXF bounds and G-code bounds. This keeps placement
-        # conservative if either parser sees geometry the other one misses.
-        slot_w = max(float(raw_slot_w or 0), float(gcode_w or 0))
-        slot_h = max(float(raw_slot_h or 0), float(gcode_h or 0))
-        if slot_w <= 0 or slot_h <= 0:
-            raise ValueError(f'Could not determine valid bounds for {part.get("source_name", "part")}')
-
-        return {
-            'part': part,
-            'gcode': normalized_gcode,
-            'slot_w': slot_w,
-            'slot_h': slot_h,
-            'rotation_label': rot_label,
-        }
-
-    def choose_candidate(part):
-        if nest_rotation == '90':
-            return build_candidate(part, True)
-        if nest_rotation == '0':
-            return build_candidate(part, False)
-
-        c0 = build_candidate(part, False)
-        c90 = build_candidate(part, True)
-
-        # Auto: prefer the orientation that is narrower for shelf packing; use
-        # height as the tie-breaker. This mirrors the simple V1 shelf strategy.
-        if (c90['slot_w'], c90['slot_h']) < (c0['slot_w'], c0['slot_h']):
-            return c90
-        return c0
-
-    candidates = [choose_candidate(part) for part in parts]
-    candidates.sort(key=lambda c: c['slot_w'] * c['slot_h'], reverse=True)
+    parts = sorted(parts, key=lambda p: max(float(p.get('part_w', 0) or 0), float(p.get('part_h', 0) or 0)) * min(float(p.get('part_w', 0) or 0), float(p.get('part_h', 0) or 0)), reverse=True)
 
     placements = []
     x_cursor = 0.0
@@ -230,9 +148,16 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
     row_height = 0.0
     max_x_used = 0.0
 
-    for idx, candidate in enumerate(candidates):
-        slot_w = candidate['slot_w']
-        slot_h = candidate['slot_h']
+    for idx, part in enumerate(parts):
+        do_rotate = choose_rotation(part)
+        if do_rotate:
+            slot_w, slot_h = part['part_h'], part['part_w']
+            gcode = FRCPostProcessor.rotate_gcode_90(part['result'].gcode, part['part_w'], part['part_h'])
+            rot_label = '90°'
+        else:
+            slot_w, slot_h = part['part_w'], part['part_h']
+            gcode = part['result'].gcode
+            rot_label = '0°'
 
         if x_cursor > 0 and (x_cursor + slot_w) > stock_x:
             x_cursor = 0.0
@@ -245,19 +170,19 @@ def combine_multi_dxf_results(parts, stock_x, stock_y, gap, nest_rotation, times
 
         if (y_cursor + slot_h) > stock_y:
             raise ValueError(
-                f'Not enough stock space for part {idx + 1}: needed {slot_w:.3f}" x {slot_h:.3f}", '
-                f'but only {(stock_x - x_cursor):.3f}" x {(stock_y - y_cursor):.3f}" remained.'
+                f'Not enough stock space for part {idx + 1}: needed {(slot_w):.3f}\" x {(slot_h):.3f}\", '
+                f'but only {(stock_x - x_cursor):.3f}\" x {(stock_y - y_cursor):.3f}\" remained.'
             )
 
         placements.append({
             'index': idx,
-            'source_name': candidate['part']['source_name'],
-            'gcode': candidate['gcode'],
+            'source_name': part['source_name'],
+            'gcode': gcode,
             'x': x_cursor,
             'y': y_cursor,
             'slot_w': slot_w,
             'slot_h': slot_h,
-            'rotation_label': candidate['rotation_label'],
+            'rotation_label': rot_label,
         })
 
         max_x_used = max(max_x_used, x_cursor + slot_w)
@@ -935,7 +860,7 @@ def process_file():
                         result = standard_parts[0]['result']
                         stock_x = standard_parts[0]['pp'].config.machine_x_max
                         stock_y = standard_parts[0]['pp'].config.machine_y_max
-                        gap = float(tool_diameter or 0.0)  # Keep at least one tool diameter between part geometry so offset toolpaths do not collide
+                        gap = AUTO_NEST_CLEARANCE_INCHES  # Small clearance between auto-nested parts
 
                         try:
                             combined_gcode, placements, used_w, used_h = combine_multi_dxf_results(
