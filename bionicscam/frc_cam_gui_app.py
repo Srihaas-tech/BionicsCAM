@@ -207,7 +207,7 @@ from datetime import datetime
 from urllib.parse import urlencode
 import ezdxf
 import logging
-import metrics
+from bionicscam import metrics
 
 # Configure logging for Vercel
 logging.basicConfig(
@@ -233,7 +233,7 @@ def log(*args, **kwargs):
 
 # Import Google Drive integration (optional - will work without it)
 try:
-    from google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
+    from bionicscam.integrations.google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
     GOOGLE_DRIVE_AVAILABLE = True
 except ImportError:
     GOOGLE_DRIVE_AVAILABLE = False
@@ -242,7 +242,7 @@ except ImportError:
 
 # Import authentication (optional - will work without it)
 try:
-    from penguincam_auth import init_auth
+    from bionicscam.integrations.penguincam_auth import init_auth
     AUTH_AVAILABLE = True
 except ImportError:
     AUTH_AVAILABLE = False
@@ -250,17 +250,17 @@ except ImportError:
 
 # Import Onshape integration (optional - will work without it)
 try:
-    from onshape_integration import get_onshape_client, session_manager
+    from bionicscam.integrations.onshape_integration import get_onshape_client, session_manager
     ONSHAPE_AVAILABLE = True
 except ImportError:
     ONSHAPE_AVAILABLE = False
     log("⚠️  Onshape integration not available")
 
 # Import postprocessor directly (for API calls instead of subprocess)
-from frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
+from bionicscam.frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
 
 # Import team config management
-from team_config import TeamConfig
+from bionicscam.team_config import TeamConfig
 
 # ============================================================================
 # File Token Manager - Secure file access with random tokens
@@ -372,7 +372,13 @@ def cleanup_worker():
 
 # Initialize file token manager
 file_token_manager = FileTokenManager()
-app = Flask(__name__)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+app = Flask(
+    __name__,
+    template_folder=str(REPO_ROOT / 'web' / 'templates'),
+    static_folder=str(REPO_ROOT / 'web' / 'static'),
+    static_url_path='/static'
+)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
 # Disable Flask/Werkzeug request logging in production (Vercel)
