@@ -1976,7 +1976,7 @@ class OnshapeClient:
 
     def export_selected_faces_as_dxfs(self, document_id, workspace_id, element_id,
                                       selected_face_ids, selected_body_ids=None,
-                                      selection_metadata=None,
+                                      selected_records=None,
                                       multilayer=True):
         """
         Export only user-selected Onshape faces as separate DXFs.
@@ -1990,67 +1990,35 @@ class OnshapeClient:
         log(f"MULTI-PART EXPORT: selected Onshape entities -> individual DXFs ({'2.5D' if multilayer else '2D'})")
         log(f"Selected face IDs/raw paths: {selected_face_ids}")
         log(f"Selected body IDs/raw paths: {selected_body_ids}")
-        log(f"Selected metadata count: {len(selection_metadata or [])}")
-        if selection_metadata:
-            log(f"Selected metadata sample: {json.dumps(selection_metadata[:2], default=str)[:2000]}")
+        log(f"Selected raw record count: {len(selected_records or [])}")
         log(f"{'='*70}")
 
         selected_face_ids = [str(fid).strip() for fid in (selected_face_ids or []) if str(fid).strip()]
         selected_body_ids = [str(bid).strip() for bid in (selected_body_ids or []) if str(bid).strip()]
-        selection_metadata = selection_metadata or []
-
-        def add_unique(target, value):
-            text = str(value or '').strip()
-            if text and text not in target:
-                target.append(text)
-
-        def collect_selection_ids(obj, key_predicate, target, depth=0):
-            if obj is None or depth > 6:
-                return
-            if isinstance(obj, list):
-                for item in obj:
-                    collect_selection_ids(item, key_predicate, target, depth + 1)
-                return
-            if not isinstance(obj, dict):
-                return
-            for key, value in obj.items():
-                lower_key = str(key).lower()
-                if key_predicate(lower_key):
-                    if isinstance(value, (str, int, float)):
-                        add_unique(target, value)
-                    elif isinstance(value, dict):
-                        for nested_key in ('id', 'value', 'bodyId', 'partId', 'occurrenceId', 'faceId', 'entityId'):
-                            if nested_key in value:
-                                add_unique(target, value.get(nested_key))
-                    elif isinstance(value, list):
-                        for item in value:
-                            if isinstance(item, (str, int, float)):
-                                add_unique(target, item)
-                            elif isinstance(item, dict):
-                                for nested_key in ('id', 'value', 'bodyId', 'partId', 'occurrenceId', 'faceId', 'entityId'):
-                                    if nested_key in item:
-                                        add_unique(target, item.get(nested_key))
-                if isinstance(value, (dict, list)):
-                    collect_selection_ids(value, key_predicate, target, depth + 1)
-
-        for selection in selection_metadata:
-            collect_selection_ids(
-                selection,
-                lambda key: key in ('faceid', 'face', 'entityid', 'geometryid', 'selectionid'),
-                selected_face_ids
-            )
-            collect_selection_ids(
-                selection,
-                lambda key: key in ('bodyid', 'partid', 'occurrenceid', 'partidwithmicroversion', 'owningbodyid', 'solidid', 'ownerid'),
-                selected_body_ids
-            )
-
-        log(f"Expanded selected face IDs/raw paths: {selected_face_ids}")
-        log(f"Expanded selected body IDs/raw paths: {selected_body_ids}")
+        selected_records = selected_records or []
 
         if not selected_face_ids and not selected_body_ids:
             log("⚠️  No selected face/body IDs supplied")
             return []
+
+        def record_string_values(value, depth=0):
+            values = []
+            if depth > 8 or value is None:
+                return values
+            if isinstance(value, (str, int, float)):
+                text = str(value).strip()
+                if text:
+                    values.append(text)
+                return values
+            if isinstance(value, list):
+                for item in value:
+                    values.extend(record_string_values(item, depth + 1))
+                return values
+            if isinstance(value, dict):
+                for child in value.values():
+                    values.extend(record_string_values(child, depth + 1))
+                return values
+            return values
 
         def clean_export_id(raw_id):
             """Prefer the most export-looking token from an Onshape selection path."""
@@ -2124,6 +2092,15 @@ class OnshapeClient:
             body_candidate_set.update(id_candidates(bid))
         for fid in selected_face_ids:
             body_candidate_set.update(id_candidates(fid))
+
+        raw_record_values = []
+        for record in selected_records:
+            raw_record_values.extend(record_string_values(record))
+        for value in raw_record_values:
+            face_candidate_set.update(id_candidates(value))
+            body_candidate_set.update(id_candidates(value))
+
+        log(f"Expanded selected face/body candidate token count: {len(face_candidate_set | body_candidate_set)}")
 
         try:
             faces_data = self.list_faces(document_id, workspace_id, element_id)
@@ -2244,6 +2221,114 @@ class OnshapeClient:
         log(f"SELECTED MULTI-PART EXPORT complete: {len(results)} DXF(s)")
         log(f"{'='*70}\n")
         return results
+
+    def debug_selected_entity_resolution(self, document_id, workspace_id, element_id,
+                                         selected_face_ids=None, selected_body_ids=None,
+                                         selected_records=None):
+        """Return browser-safe debug info for selected Onshape ID matching."""
+        selected_face_ids = [str(fid).strip() for fid in (selected_face_ids or []) if str(fid).strip()]
+        selected_body_ids = [str(bid).strip() for bid in (selected_body_ids or []) if str(bid).strip()]
+        selected_records = selected_records or []
+
+        def safe_preview(value, limit=900):
+            try:
+                text = json.dumps(value, default=str) if not isinstance(value, str) else value
+            except Exception:
+                text = str(value)
+            return text[:limit]
+
+        def id_candidates(raw_id):
+            if raw_id is None:
+                return set()
+            text = str(raw_id).strip()
+            if not text:
+                return set()
+            candidates = {text}
+            for token in re.split(r'[^A-Za-z0-9_\-]+', text):
+                token = token.strip().strip('[](){}')
+                if token:
+                    candidates.add(token)
+            return {c for c in candidates if c}
+
+        def walk_values(value, depth=0):
+            values = []
+            if depth > 8 or value is None:
+                return values
+            if isinstance(value, (str, int, float)):
+                text = str(value).strip()
+                if text:
+                    values.append(text)
+                return values
+            if isinstance(value, list):
+                for item in value:
+                    values.extend(walk_values(item, depth + 1))
+                return values
+            if isinstance(value, dict):
+                for child in value.values():
+                    values.extend(walk_values(child, depth + 1))
+                return values
+            return values
+
+        selected_tokens = set()
+        for value in selected_face_ids + selected_body_ids:
+            selected_tokens.update(id_candidates(value))
+        for record in selected_records:
+            for value in walk_values(record):
+                selected_tokens.update(id_candidates(value))
+
+        debug = {
+            'selected_face_ids': selected_face_ids,
+            'selected_body_ids': selected_body_ids,
+            'raw_selection_record_count': len(selected_records),
+            'raw_selection_record_samples': [safe_preview(r) for r in selected_records[:3]],
+            'expanded_selected_token_samples': sorted(selected_tokens, key=lambda x: (len(x), x))[:80],
+            'available_body_ids': [],
+            'available_face_samples': [],
+            'matched_body_ids': [],
+            'matched_face_ids': [],
+        }
+
+        try:
+            faces_data = self.list_faces(document_id, workspace_id, element_id)
+            bodies_with_faces = self.get_body_faces(
+                document_id, workspace_id, element_id,
+                cached_faces_data=faces_data
+            ) if faces_data else None
+        except Exception as exc:
+            debug['bodydetails_error'] = str(exc)
+            return debug
+
+        if not bodies_with_faces:
+            debug['bodydetails_error'] = 'No bodies/faces returned from Onshape bodydetails endpoint.'
+            return debug
+
+        for bid, body_data in bodies_with_faces.items():
+            debug['available_body_ids'].append({
+                'body_id': bid,
+                'name': body_data.get('name', 'Part'),
+                'face_count': len(body_data.get('faces', [])),
+            })
+            if id_candidates(bid) & selected_tokens:
+                debug['matched_body_ids'].append(bid)
+            for face in body_data.get('faces', [])[:6]:
+                fid = face.get('id')
+                if fid:
+                    debug['available_face_samples'].append({
+                        'body_id': bid,
+                        'body_name': body_data.get('name', 'Part'),
+                        'face_id': fid,
+                        'area': face.get('area', 0),
+                        'surfaceType': face.get('surfaceType', 'UNKNOWN'),
+                    })
+                    if id_candidates(fid) & selected_tokens:
+                        debug['matched_face_ids'].append(fid)
+                if len(debug['available_face_samples']) >= 40:
+                    break
+            if len(debug['available_face_samples']) >= 40:
+                break
+
+        debug['available_body_ids'] = debug['available_body_ids'][:40]
+        return debug
 
     def export_all_parts_as_dxfs(self, document_id, workspace_id, element_id, multilayer=True):
         """
