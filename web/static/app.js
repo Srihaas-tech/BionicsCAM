@@ -586,7 +586,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             formData.append('rotation', rotationAngle); // Add rotation angle
             const quantityVal = parseInt(document.getElementById('quantity')?.value || '1', 10);
-            formData.append('quantity', filesToUpload.length > 1 ? '1' : Math.max(1, quantityVal));
+            formData.append('quantity', String(Math.max(1, quantityVal)));
             const nestRotationVal = document.getElementById('nestRotation')?.value || 'auto';
             formData.append('nest_rotation', nestRotationVal);
             if (appState.suggestedFilename) {
@@ -1303,7 +1303,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 const texts = await Promise.all(files.map(readDxfFileAsText));
-                const parts = texts.map((text, index) => {
+                const baseParts = texts.map((text, index) => {
                     const parsed = parseDxfManually(text);
                     const visualBounds = calculateGeometryVisualBounds(parsed?.geometry) || parsed?.bounds;
                     return {
@@ -1322,8 +1322,19 @@ document.addEventListener('DOMContentLoaded', () => {
                     return ok;
                 });
 
-                if (parts.length === 0) {
+                if (baseParts.length === 0) {
                     throw new Error('No valid DXF geometry was found for the setup preview.');
+                }
+
+                const quantity = Math.max(1, parseInt(document.getElementById('quantity')?.value || '1', 10) || 1);
+                const parts = [];
+                for (let copy = 0; copy < quantity; copy++) {
+                    for (const part of baseParts) {
+                        parts.push({
+                            ...part,
+                            name: quantity > 1 ? `${part.name} copy ${copy + 1}` : part.name
+                        });
+                    }
                 }
 
                 buildCompositePreview(parts);
