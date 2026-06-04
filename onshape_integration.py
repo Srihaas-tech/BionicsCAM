@@ -692,7 +692,12 @@ class OnshapeClient:
             log(f"Element ID: {element_id}")
             log(f"Full endpoint: {self.API_BASE}{endpoint}")
 
-            response = self._make_api_request('GET', endpoint)
+            # includeFaces=true is required to get face data (normals, areas, IDs).
+            # rollbackBarIndex=-1 queries end-of-feature-tree state, not an intermediate one.
+            response = self._make_api_request('GET', endpoint, params={
+                'includeFaces': 'true',
+                'rollbackBarIndex': '-1',
+            })
 
             log(f"\n📡 Response status: {response.status_code}")
 
