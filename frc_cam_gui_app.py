@@ -1818,7 +1818,39 @@ def onshape_import():
         if multi_parts:
             multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
             selected_face_ids_raw = raw_params.get('faceIds', '').strip()
-            selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
+            selected_face_ids_all = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
+
+            # Separate real face IDs from body:XYZ sentinels the panel sends
+            # when Onshape only gave it a short body ID (<=4 chars).
+            selected_face_ids = [fid for fid in selected_face_ids_all if not fid.startswith('body:')]
+            body_id_hints = [fid[len('body:'):] for fid in selected_face_ids_all if fid.startswith('body:')]
+
+            # Also accept an explicit partIds param as body ID hints
+            part_ids_raw = raw_params.get('partIds', '').strip()
+            if part_ids_raw:
+                for pid in part_ids_raw.split(','):
+                    pid = pid.strip()
+                    if pid and pid not in body_id_hints:
+                        body_id_hints.append(pid)
+
+            log(f"🔍 face IDs from panel: {selected_face_ids}, body ID hints: {body_id_hints}")
+
+            # If no real face IDs but we have body IDs, auto-select the top
+            # face of each body so the export can proceed normally.
+            if not selected_face_ids and body_id_hints:
+                log("⚠️  No face IDs – resolving top faces from body ID hints")
+                faces_data_hint = client.list_faces(document_id, workspace_id, element_id)
+                for bid in body_id_hints:
+                    fid, _, _, _ = client.auto_select_top_face(
+                        document_id, workspace_id, element_id,
+                        body_id=bid,
+                        cached_faces_data=faces_data_hint
+                    )
+                    if fid:
+                        selected_face_ids.append(fid)
+                        log(f"✅ Resolved body {bid} → face {fid}")
+                    else:
+                        log(f"⚠️  Could not resolve top face for body {bid}")
 
             if selected_face_ids:
                 log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
