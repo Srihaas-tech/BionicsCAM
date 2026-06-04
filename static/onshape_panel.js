@@ -147,21 +147,30 @@
 
     // Onshape body IDs are short (≤4 chars, e.g. "JjG").
     // Face IDs are long deterministic strings. Use length to tell them apart.
+    function isFaceSelection(sel) {
+        const entityType = String(sel.entityType || sel.selectionType || '').toUpperCase();
+        return entityType.includes('FACE') || entityType.includes('ENTITY') || !entityType;
+    }
+
     function extractPartId(sel) {
         if (sel.partId) return sel.partId;
         if (sel.bodyId) return sel.bodyId;
-        if (sel.deterministicId) return sel.deterministicId;
+        if (sel.deterministicId && !isFaceSelection(sel)) return sel.deterministicId;
         if (sel.part && sel.part.partId) return sel.part.partId;
         if (sel.part && sel.part.bodyId) return sel.part.bodyId;
-        const id = sel.selectionId || sel.id || '';
-        if (id && id.length <= 4) return id;
+        if (sel.body && sel.body.id) return sel.body.id;
+        if (sel.body && sel.body.bodyId) return sel.body.bodyId;
         return null;
     }
 
     function extractFaceId(sel) {
         if (sel.faceId) return sel.faceId;
-        const id = sel.selectionId || sel.id || '';
-        if (id && id.length > 4) return id;
+        if (sel.entityId && isFaceSelection(sel)) return sel.entityId;
+        // Onshape can send face selection IDs as short tokens like JPK/JjG.
+        // Do NOT reject them just because they are short; that was the bug
+        // that made multi-import arrive at the backend with zero face IDs.
+        const id = sel.selectionId || sel.id || sel.deterministicId || '';
+        if (id && isFaceSelection(sel)) return id;
         return null;
     }
 
@@ -331,7 +340,8 @@
             multilayer: isMultilayer ? 'true' : 'false',
             multi: 'true',
             selectedOnly: 'true',
-            faceIds: selectedFaceIds.join(',')
+            faceIds: selectedFaceIds.join(','),
+            rawSelections: JSON.stringify(selectedSelections || [])
         });
         // Also send body IDs so server can resolve face when only body ID is known
         if (selectedPartIds.length) {
