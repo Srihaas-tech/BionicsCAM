@@ -3,7 +3,7 @@ import unittest
 import tempfile
 import os
 import re
-from bionicscam.postprocessor import FRCPostProcessor
+from bionicscam.frc_cam_postprocessor import FRCPostProcessor
 
 
 class TestYCoordinateAdjustment(unittest.TestCase):

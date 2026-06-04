@@ -60,13 +60,13 @@ How far to cut into the sacrifice board (default: 0.02")
 **Usage:**
 ```bash
 # Default (0.02" into sacrifice board)
-python -m bionicscam.postprocessor part.dxf output.gcode --thickness 0.25
+python frc_cam_postprocessor.py part.dxf output.gcode --thickness 0.25
 
 # More aggressive overcut (0.03")
-python -m bionicscam.postprocessor part.dxf output.gcode --thickness 0.25 --sacrifice-depth 0.03
+python frc_cam_postprocessor.py part.dxf output.gcode --thickness 0.25 --sacrifice-depth 0.03
 
 # Minimal overcut (0.01")
-python -m bionicscam.postprocessor part.dxf output.gcode --thickness 0.25 --sacrifice-depth 0.01
+python frc_cam_postprocessor.py part.dxf output.gcode --thickness 0.25 --sacrifice-depth 0.01
 ```
 
 **Recommendations:**

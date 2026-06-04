@@ -1,13 +1,17 @@
 """
-Deployment entrypoint for BionicsCAM.
+Vercel entrypoint for PenguinCAM Flask application.
 
-The real Flask app lives in bionicscam.app_server now; this tiny launcher
-keeps Vercel/Gunicorn and old habits from exploding.
+Vercel expects a file named 'app.py' that exports the Flask app instance
+as 'app'. This file imports from the main application module.
 """
 
-from bionicscam.app_server import app
+from bionicscam.frc_cam_gui_app import app
+
+# Vercel will use this 'app' variable as the WSGI application
+# No need to call app.run() - Vercel handles that
 
 if __name__ == '__main__':
+    # For local testing with: python app.py
     import os
     port = int(os.environ.get('PORT', 6238))
     app.run(host='0.0.0.0', port=port, debug=True)

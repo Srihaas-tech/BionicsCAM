@@ -1,27 +1,36 @@
-# BionicsCAM Repo Reorg Map
+# Repository Layout
 
-The repo got cleaned up without removing the chaos entirely. Chaos is load-bearing.
+The repo was reorganized with normal folder names and without the goblin folder names.
 
-## New folders
+## Root
 
-| Folder | What lives there |
-|---|---|
-| `bionicscam/` | Core Python app code: Flask app, postprocessor, config, metrics |
-| `bionicscam/integrations/` | Onshape, Google Drive, and auth integration goblins |
-| `web_goblin/` | Browser stuff: templates, CSS, JS, logos, static docs |
-| `config_cave/` | Local JSON config files |
-| `script_snacks/` | Helper scripts, debug scripts, batch scripts |
-| `sample_junk_drawer/` | Sample DXFs, generated G-code examples, self-test files |
-| `docs/` | Human-readable docs, allegedly |
-| `tests/` | Unit tests and regression traps |
+- `app.py` - deployment/local Flask entrypoint
+- `requirements*.txt` - Python dependencies
+- `README.md`, `ROADMAP.md`, `LICENSE.txt`, `CLAUDE.md` - docs/meta files
 
-## Main entrypoints
+## Folders
 
-- Local GUI: `./start_gui.sh`
-- Python module app: `python3 -m bionicscam.app_server`
-- Deployment entrypoint: `app.py`
-- Postprocessor CLI: `python3 -m bionicscam.postprocessor input.dxf output.gcode ...`
+- `bionicscam/` - main Python application code
+- `bionicscam/integrations/` - Onshape, Google Drive, and auth integrations
+- `web/templates/` - Flask HTML templates
+- `web/static/` - browser JavaScript, CSS, logo assets, EULA
+- `config/` - local JSON config files
+- `scripts/` - helper scripts, launchers, debug scripts, batch scripts
+- `samples/` - sample DXF, G-code, and machine self-test files
+- `deployment/` - deployment-related files
+- `docs/` - project documentation
+- `tests/` - automated tests
 
-## Why the funny names?
+## New run command
 
-Because if a folder is going to contain JavaScript, HTML, CSS, logos, static docs, and mysterious browser rituals, `web_goblin/` is more honest than `frontend/`.
+From the repo root:
+
+```bash
+./scripts/start_gui.sh
+```
+
+Or directly:
+
+```bash
+python3 -m bionicscam.frc_cam_gui_app
+```

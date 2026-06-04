@@ -17,19 +17,19 @@ PenguinCAM is a web-based CAM post-processor that generates CNC G-code from DXF 
 make install
 
 # Run development server (opens http://localhost:6238)
-uv run python -m bionicscam.app_server
+uv run python frc_cam_gui_app.py
 
 # Run G-code comparison tests
 make test
 
 # Run postprocessor directly (CLI)
-uv run python -m bionicscam.postprocessor INPUT.dxf OUTPUT.nc \
+uv run python frc_cam_postprocessor.py INPUT.dxf OUTPUT.nc \
   --material plywood \
   --thickness 0.25 \
   --tool-diameter 0.157
 
 # Test any Python module import
-uv run python -c "from bionicscam.app_server import app; print('OK')"
+uv run python -c "from frc_cam_gui_app import app; print('OK')"
 ```
 
 ## Dependency Management
@@ -84,20 +84,20 @@ When generating G-code comments:
 ```
 Browser (index.html + Three.js)
     ↓ HTTP POST /process
-Flask Server (bionicscam/app_server.py)
+Flask Server (frc_cam_gui_app.py)
     ↓ subprocess
-G-code Generator (bionicscam/postprocessor.py)
+G-code Generator (frc_cam_postprocessor.py)
     ↓
 .nc file → 3D visualization / download / Drive upload
 ```
 
 **Key files:**
-- `bionicscam/app_server.py` - Flask routes, Onshape OAuth, Drive integration
-- `bionicscam/postprocessor.py` - Core G-code generation (`FRCPostProcessor` class)
-- `web_goblin/web_goblin/templates/index.html` - Single-page app with Three.js 3D visualization
-- `bionicscam/integrations/onshape.py` - Onshape API client for one-click export
-- `bionicscam/integrations/penguin_auth.py` - Google Workspace OAuth (optional)
-- `bionicscam/integrations/google_drive.py` - Drive upload (optional)
+- `frc_cam_gui_app.py` - Flask routes, Onshape OAuth, Drive integration
+- `frc_cam_postprocessor.py` - Core G-code generation (`FRCPostProcessor` class)
+- `templates/index.html` - Single-page app with Three.js 3D visualization
+- `onshape_integration.py` - Onshape API client for one-click export
+- `penguincam_auth.py` - Google Workspace OAuth (optional)
+- `google_drive_integration.py` - Drive upload (optional)
 
 ## Documentation
 

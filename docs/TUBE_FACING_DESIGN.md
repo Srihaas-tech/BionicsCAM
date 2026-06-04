@@ -223,7 +223,7 @@ This prevents collisions with the jig or workpiece during XY rapids.
 ## CLI Usage
 
 ```bash
-python -m bionicscam.postprocessor output.nc --mode tube-facing --tube-size 1x1
+python frc_cam_postprocessor.py output.nc --mode tube-facing --tube-size 1x1
 ```
 
 ### Arguments
@@ -242,7 +242,7 @@ python -m bionicscam.postprocessor output.nc --mode tube-facing --tube-size 1x1
 
 | File | Purpose |
 |------|---------|
-| `bionicscam/postprocessor.py` | Main code with `generate_tube_facing_gcode()` method |
+| `frc_cam_postprocessor.py` | Main code with `generate_tube_facing_gcode()` method |
 | `tube_facing_toolpath.py` | Extracted Fusion 360 toolpath as string constant |
 | `tests/test_tube_facing.py` | Unit tests for tube facing mode |
 
