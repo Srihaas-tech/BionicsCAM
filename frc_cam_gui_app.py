@@ -1780,34 +1780,14 @@ def onshape_import():
         if multi_parts:
             multilayer_for_multi = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
             selected_face_ids_raw = raw_params.get('faceIds', '').strip()
-            selected_body_ids_raw = raw_params.get('bodyIds', '').strip()
-            raw_selections_text = raw_params.get('rawSelections', '').strip()
-
             selected_face_ids = [fid.strip() for fid in selected_face_ids_raw.split(',') if fid.strip()]
-            selected_body_ids = [bid.strip() for bid in selected_body_ids_raw.split(',') if bid.strip()]
-            raw_selection_records = []
-            if raw_selections_text:
-                try:
-                    raw_selection_records = json.loads(raw_selections_text)
-                    if not isinstance(raw_selection_records, list):
-                        raw_selection_records = []
-                except Exception as raw_selection_error:
-                    log(f"⚠️  Could not parse raw Onshape selections: {raw_selection_error}")
-                    raw_selection_records = []
 
-            if selected_face_ids or selected_body_ids or raw_selection_records:
-                log(
-                    f"🗂️  Selected multi-part import requested – exporting "
-                    f"{len(selected_face_ids)} face id(s), {len(selected_body_ids)} body id(s), "
-                    f"{len(raw_selection_records)} raw selection record(s) as separate "
-                    f"{'2.5D' if multilayer_for_multi else '2D'} DXFs"
-                )
+            if selected_face_ids:
+                log(f"🗂️  Selected multi-part import requested – exporting {len(selected_face_ids)} selected face(s) as separate {'2.5D' if multilayer_for_multi else '2D'} DXFs")
                 part_exports = client.export_selected_faces_as_dxfs(
                     document_id, workspace_id, element_id,
                     selected_face_ids,
-                    multilayer=multilayer_for_multi,
-                    selected_body_ids=selected_body_ids,
-                    raw_selection_records=raw_selection_records
+                    multilayer=multilayer_for_multi
                 )
                 empty_message = 'BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part.'
             else:
@@ -1819,14 +1799,21 @@ def onshape_import():
                 empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
 
             if not part_exports:
-                debug_payload = getattr(client, 'last_selected_export_debug', None)
-                response_payload = {
+                api_limit_error = getattr(client, 'last_api_limit_error', None)
+                if api_limit_error:
+                    return jsonify({
+                        'error': 'Onshape API limit exceeded',
+                        'message': (
+                            'Onshape rejected the selected-part export because the API limit/quota was exceeded. '
+                            'Wait a bit, reduce repeated import attempts, or use manual DXF export/upload until the quota resets.'
+                        ),
+                        'debug': api_limit_error,
+                    }), 429
+
+                return jsonify({
                     'error': 'No parts could be exported from this document',
                     'message': empty_message
-                }
-                if debug_payload:
-                    response_payload['debug'] = debug_payload
-                return jsonify(response_payload), 500
+                }), 500
 
             dxf_files_inline = []
             for part in part_exports:
