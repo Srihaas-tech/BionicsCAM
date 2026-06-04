@@ -34,21 +34,21 @@ if [ $? -ne 0 ]; then
 fi
 
 # Check if post-processor exists
-if [ ! -f "bionicscam/frc_cam_postprocessor.py" ]; then
-    echo "❌ Error: bionicscam/frc_cam_postprocessor.py not found"
-    echo "Please run this from the repository root"
+if [ ! -f "frc_cam_postprocessor.py" ]; then
+    echo "❌ Error: frc_cam_postprocessor.py not found"
+    echo "Please make sure it's in the same directory as this script"
     exit 1
 fi
 
 # Check if templates directory exists
-if [ ! -d "web/templates" ]; then
-    echo "❌ Error: web/templates/ directory not found"
+if [ ! -d "templates" ]; then
+    echo "❌ Error: templates/ directory not found"
     echo ""
     echo "You need this structure:"
     echo "  your-directory/"
-    echo "  ├── bionicscam/frc_cam_gui_app.py"
-    echo "  ├── bionicscam/frc_cam_postprocessor.py"
-    echo "  └── web/templates/"
+    echo "  ├── frc_cam_gui_app.py"
+    echo "  ├── frc_cam_postprocessor.py"
+    echo "  └── templates/"
     echo "      └── index.html"
     echo ""
     echo "Create templates directory and put index.html inside it:"
@@ -58,8 +58,8 @@ if [ ! -d "web/templates" ]; then
 fi
 
 # Check if index.html exists in templates
-if [ ! -f "web/templates/index.html" ]; then
-    echo "❌ Error: web/templates/index.html not found"
+if [ ! -f "templates/index.html" ]; then
+    echo "❌ Error: templates/index.html not found"
     echo ""
     echo "index.html must be inside the templates/ directory"
     echo ""
@@ -99,7 +99,7 @@ cleanup() {
         
         # Force kill if still running
         kill -9 $SERVER_PID 2>/dev/null
-        pkill -9 -f "bionicscam.frc_cam_gui_app" 2>/dev/null
+        pkill -9 -f "frc_cam_gui_app.py" 2>/dev/null
     fi
     
     echo "✓ Server stopped"
@@ -111,7 +111,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # Start the server in background
-python3 -m bionicscam.frc_cam_gui_app &
+python3 frc_cam_gui_app.py &
 SERVER_PID=$!
 
 # Wait a moment for server to start

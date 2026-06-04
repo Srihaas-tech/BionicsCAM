@@ -25,7 +25,7 @@ for %%f in (*.dxf) do (
     set "gcode_file=%%~nf.gcode"
     
     echo Processing: !dxf_file! -^> !gcode_file!
-    python -m bionicscam.frc_cam_postprocessor "!dxf_file!" "!gcode_file!" --thickness %THICKNESS% --tabs %TABS%
+    python frc_cam_postprocessor.py "!dxf_file!" "!gcode_file!" --thickness %THICKNESS% --tabs %TABS%
     
     if errorlevel 1 (
         echo   X Failed

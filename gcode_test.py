@@ -1,6 +1,6 @@
 from pygcode import *
 from termcolor import colored
-from bionicscam.frc_cam_postprocessor import FRCPostProcessor
+from frc_cam_postprocessor import FRCPostProcessor
 import argparse
 import io
 import sys
@@ -290,8 +290,8 @@ if __name__ == "__main__":
 
     QUIET_MODE = args.quiet
 
-    INPUT_DXF = "./samples/test_part.dxf"
-    FUSION_REFERENCE = "./samples/fusion_output.gcode"
+    INPUT_DXF = "./test_part.dxf"
+    FUSION_REFERENCE = "./fusion_output.gcode"
 
     # CAM parameters
     MATERIAL = 'plywood'

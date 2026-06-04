@@ -23,7 +23,7 @@ for dxf_file in *.dxf; do
     gcode_file="${dxf_file%.dxf}.gcode"
     
     echo "Processing: $dxf_file → $gcode_file"
-    python -m bionicscam.frc_cam_postprocessor "$dxf_file" "$gcode_file" \
+    python frc_cam_postprocessor.py "$dxf_file" "$gcode_file" \
         --thickness "$THICKNESS" \
         --tabs "$TABS"
     

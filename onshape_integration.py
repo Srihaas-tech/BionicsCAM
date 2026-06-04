@@ -6,7 +6,6 @@ Handles OAuth authentication and DXF export from Onshape
 import logging
 import math
 import os
-from pathlib import Path
 import re
 import sys
 import json
@@ -79,7 +78,7 @@ class OnshapeClient:
     
     def _save_config(self):
         """Save configuration"""
-        with open(Path(__file__).resolve().parents[2] / 'config' / 'onshape_config.json', 'w') as f:
+        with open('onshape_config.json', 'w') as f:
             json.dump(self.config, f, indent=2)
     
     def get_authorization_url(self, state=None):

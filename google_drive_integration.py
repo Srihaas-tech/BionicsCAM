@@ -54,7 +54,7 @@ class GoogleDriveUploader:
         
     def _load_config(self):
         """Load drive configuration (folder IDs, etc.)"""
-        config_file = str(Path(__file__).resolve().parents[2] / 'config' / 'drive_config.json')
+        config_file = 'drive_config.json'
         if os.path.exists(config_file):
             with open(config_file, 'r') as f:
                 return json.load(f)
@@ -71,8 +71,7 @@ class GoogleDriveUploader:
     
     def _save_config(self):
         """Save configuration"""
-        config_file = Path(__file__).resolve().parents[2] / 'config' / 'drive_config.json'
-        with open(config_file, 'w') as f:
+        with open('drive_config.json', 'w') as f:
             json.dump(self.config, f, indent=2)
     
     def authenticate(self):

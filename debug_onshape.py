@@ -10,7 +10,7 @@ import os
 # Add current directory to path so we can import our modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bionicscam.integrations.onshape_integration import session_manager, get_onshape_client
+from onshape_integration import session_manager, get_onshape_client
 from flask import Flask, session
 
 app = Flask(__name__)

@@ -237,7 +237,7 @@ def log(*args, **kwargs):
 
 # Import Google Drive integration (optional - will work without it)
 try:
-    from bionicscam.integrations.google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
+    from google_drive_integration import upload_gcode_to_drive, GoogleDriveUploader
     GOOGLE_DRIVE_AVAILABLE = True
 except ImportError:
     GOOGLE_DRIVE_AVAILABLE = False
@@ -246,7 +246,7 @@ except ImportError:
 
 # Import authentication (optional - will work without it)
 try:
-    from bionicscam.integrations.penguincam_auth import init_auth
+    from penguincam_auth import init_auth
     AUTH_AVAILABLE = True
 except ImportError:
     AUTH_AVAILABLE = False
@@ -254,17 +254,17 @@ except ImportError:
 
 # Import Onshape integration (optional - will work without it)
 try:
-    from bionicscam.integrations.onshape_integration import get_onshape_client, session_manager
+    from onshape_integration import get_onshape_client, session_manager
     ONSHAPE_AVAILABLE = True
 except ImportError:
     ONSHAPE_AVAILABLE = False
     log("⚠️  Onshape integration not available")
 
 # Import postprocessor directly (for API calls instead of subprocess)
-from bionicscam.frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
+from frc_cam_postprocessor import FRCPostProcessor, PostProcessorResult
 
 # Import team config management
-from bionicscam.team_config import TeamConfig
+from team_config import TeamConfig
 
 # ============================================================================
 # File Token Manager - Secure file access with random tokens
@@ -376,7 +376,7 @@ def cleanup_worker():
 
 # Initialize file token manager
 file_token_manager = FileTokenManager()
-app = Flask(__name__, template_folder='../web/templates', static_folder='../web/static')
+app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
 # Disable Flask/Werkzeug request logging in production (Vercel)

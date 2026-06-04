@@ -39,16 +39,16 @@ if %errorlevel% neq 0 (
 )
 
 REM Check if post-processor exists
-if not exist "bionicscam\frc_cam_postprocessor.py" (
-    echo Error: bionicscam\frc_cam_postprocessor.py not found
+if not exist "frc_cam_postprocessor.py" (
+    echo Error: frc_cam_postprocessor.py not found
     echo Please make sure it's in the same directory as this script
     pause
     exit /b 1
 )
 
 REM Check if templates directory exists
-if not exist "web\templates" (
-    echo Error: web\templates directory not found
+if not exist "templates" (
+    echo Error: templates directory not found
     echo.
     echo You need this structure:
     echo   your-directory\
@@ -65,8 +65,8 @@ if not exist "web\templates" (
 )
 
 REM Check if index.html exists in templates
-if not exist "web\templates\index.html" (
-    echo Error: web\templates\index.html not found
+if not exist "templates\index.html" (
+    echo Error: templates\index.html not found
     echo.
     echo index.html must be inside the templates\ directory
     echo.
@@ -92,7 +92,7 @@ echo ==========================================
 echo.
 
 REM Start the server (not in background, so it can be killed properly)
-start "PenguinCAM Server" python -m bionicscam.frc_cam_gui_app
+start "PenguinCAM Server" python frc_cam_gui_app.py
 
 REM Wait a moment for server to start
 timeout /t 3 /nobreak >nul

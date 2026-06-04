@@ -1,5 +1,5 @@
 # Generate TEST version with safety features
-python -m bionicscam.safe_test_mode samples/sample_part.dxf test_safe.gcode --thickness 0.25
+python safe_test_mode.py sample_part.dxf test_safe.gcode --thickness 0.25
 
 # This automatically:
 # ✓ Disables spindle (M3 → M5)
