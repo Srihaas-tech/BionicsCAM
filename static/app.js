@@ -2524,10 +2524,10 @@ document.addEventListener('DOMContentLoaded', () => {
             stockMesh.renderOrder = -1; // Render stock before toolpaths
             scene.add(stockMesh);
 
-            // Render DXF geometry overlay (white lines on stock top surface)
-            if (dxfGeometry && dxfGeometry.entities) {
-                renderDxfGeometry(scene, dxfGeometry.entities, stockHeight);
-            }
+            // Do not render the DXF setup overlay in the G-code preview.
+            // The G-code preview should show only the actual generated toolpath so
+            // mismatches between setup DXF outlines and generated G-code do not
+            // create a confusing double-image.
 
             // Create tool representation (endmill)
             const toolLength = Math.max(maxZ * 1.5, 1.0);
