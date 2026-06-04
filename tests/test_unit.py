@@ -11,8 +11,8 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from frc_cam_postprocessor import FRCPostProcessor, MATERIAL_PRESETS
-from team_config import TeamConfig
+from bionicscam.postprocessor import FRCPostProcessor, MATERIAL_PRESETS
+from bionicscam.team_config import TeamConfig
 
 
 class TestLowLevelUtilities(unittest.TestCase):
@@ -696,7 +696,7 @@ class TestCircularPerimeter(unittest.TestCase):
     def test_washer_with_rotation_and_translation(self):
         """Test washer-like part: circular perimeter with hole, verify proper rotation and translation."""
         # Disable pocket contouring for this test (we want to test normal hole clearing)
-        from team_config import TeamConfig
+        from bionicscam.team_config import TeamConfig
         config = TeamConfig()
         config._data['machines'] = config._data.get('machines', {})
         config._data['machines']['default'] = config._data['machines'].get('default', {})
@@ -799,7 +799,7 @@ class TestPocketContouring(unittest.TestCase):
 
     def test_large_through_cut_hole_is_contoured(self):
         """Test that a large hole cutting to sacrifice board is contoured instead of cleared"""
-        from team_config import TeamConfig
+        from bionicscam.team_config import TeamConfig
         pp = FRCPostProcessor(0.25, 0.157)
         pp.apply_material_preset('plywood')
 
@@ -832,7 +832,7 @@ class TestPocketContouring(unittest.TestCase):
 
     def test_small_through_cut_hole_is_cleared(self):
         """Test that a small hole cutting to sacrifice board is fully cleared"""
-        from team_config import TeamConfig
+        from bionicscam.team_config import TeamConfig
         pp = FRCPostProcessor(0.25, 0.157)
         pp.apply_material_preset('plywood')
 
@@ -864,7 +864,7 @@ class TestPocketContouring(unittest.TestCase):
 
     def test_large_partial_depth_hole_is_cleared(self):
         """Test that a large partial-depth hole is ALWAYS fully cleared (never contoured)"""
-        from team_config import TeamConfig
+        from bionicscam.team_config import TeamConfig
         pp = FRCPostProcessor(0.25, 0.157)
         pp.apply_material_preset('plywood')
 
@@ -899,7 +899,7 @@ class TestPocketContouring(unittest.TestCase):
 
     def test_large_through_cut_pocket_is_contoured(self):
         """Test that a large pocket cutting to sacrifice board is contoured"""
-        from team_config import TeamConfig
+        from bionicscam.team_config import TeamConfig
         pp = FRCPostProcessor(0.25, 0.157)
         pp.apply_material_preset('plywood')
 
@@ -929,7 +929,7 @@ class TestPocketContouring(unittest.TestCase):
 
     def test_small_through_cut_pocket_is_cleared(self):
         """Test that a small pocket cutting to sacrifice board is fully cleared"""
-        from team_config import TeamConfig
+        from bionicscam.team_config import TeamConfig
         pp = FRCPostProcessor(0.25, 0.157)
         pp.apply_material_preset('plywood')
 
@@ -960,7 +960,7 @@ class TestPocketContouring(unittest.TestCase):
 
     def test_large_partial_depth_pocket_is_cleared(self):
         """Test that a large partial-depth pocket is ALWAYS fully cleared"""
-        from team_config import TeamConfig
+        from bionicscam.team_config import TeamConfig
         pp = FRCPostProcessor(0.25, 0.157)
         pp.apply_material_preset('plywood')
 
@@ -994,7 +994,7 @@ class TestPocketContouring(unittest.TestCase):
 
     def test_contouring_can_be_disabled(self):
         """Test that setting contour_threshold to 0 disables all contouring"""
-        from team_config import TeamConfig
+        from bionicscam.team_config import TeamConfig
         config = TeamConfig()
         config._data['machines'] = config._data.get('machines', {})
         config._data['machines']['default'] = config._data['machines'].get('default', {})

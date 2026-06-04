@@ -200,15 +200,15 @@ Google Drive Upload
 ### Key Components
 
 **Backend (Python):**
-- `frc_cam_gui_app.py` - Flask web server
-- `frc_cam_postprocessor.py` - G-code generation engine
-- `onshape_integration.py` - Onshape API client
-- `google_drive_integration.py` - Drive uploads
-- `penguincam_auth.py` - Google OAuth authentication
+- `bionicscam/app_server.py` - Flask web server
+- `bionicscam/postprocessor.py` - G-code generation engine
+- `bionicscam/integrations/onshape.py` - Onshape API client
+- `bionicscam/integrations/google_drive.py` - Drive uploads
+- `bionicscam/integrations/penguin_auth.py` - Google OAuth authentication
 
 **Frontend:**
-- `templates/index.html` - Web interface with Three.js visualization
-- `static/popcornlogo.png` - Team branding
+- `web_goblin/web_goblin/templates/index.html` - Web interface with Three.js visualization
+- `web_goblin/web_goblin/static/bionicslogo.png` - Team branding
 
 **Configuration:**
 - `Procfile` - Railway deployment config
@@ -301,18 +301,18 @@ BionicsCAM/
 │   ├── TOOL_COMPENSATION_GUIDE.md     # Technical reference
 │   └── Z_COORDINATE_SYSTEM.md         # Zeroing guide
 │
-├── static/                            # Static assets
+├── web_goblin/static/                            # Static assets
 │   └── popcornlogo.png                # Team logo
 │
-├── templates/                         # HTML templates
+├── web_goblin/templates/                         # HTML templates
 │   └── index.html                     # Main web interface
 │
-├── frc_cam_gui_app.py                # Flask web server
-├── frc_cam_postprocessor.py          # G-code generator
-├── team_config.py                     # Team configuration management
-├── onshape_integration.py            # Onshape API
-├── google_drive_integration.py       # Drive uploads
-├── penguincam_auth.py                # OAuth authentication
+├── bionicscam/app_server.py                # Flask web server
+├── bionicscam/postprocessor.py          # G-code generator
+├── bionicscam/team_config.py                     # Team configuration management
+├── bionicscam/integrations/onshape.py            # Onshape API
+├── bionicscam/integrations/google_drive.py       # Drive uploads
+├── bionicscam/integrations/penguin_auth.py                # OAuth authentication
 │
 └── [config files...]                  # Various JSON configs
 ```
@@ -354,7 +354,7 @@ We use [uv](https://docs.astral.sh/uv/) for fast Python dependency management. T
 
 5. **Run locally:**
    ```bash
-   uv run python frc_cam_gui_app.py
+   uv run python -m bionicscam.app_server
    ```
 
 6. **Visit:** http://localhost:6238

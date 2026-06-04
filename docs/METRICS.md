@@ -118,7 +118,7 @@ Metrics work locally without any setup:
 ## Files Added
 
 - `metrics.py` - Core metrics module (~230 lines)
-- `frc_cam_gui_app.py` - Added:
+- `bionicscam/app_server.py` - Added:
   - Import metrics module
   - 4 `metrics.log_event()` calls at key success points
   - 2 admin endpoints with authentication

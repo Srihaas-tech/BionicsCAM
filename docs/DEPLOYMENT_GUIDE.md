@@ -51,7 +51,7 @@ Railway auto-detects the configuration from your repo:
 
 **Procfile:**
 ```
-web: gunicorn frc_cam_gui_app:app --bind 0.0.0.0:$PORT
+web: gunicorn app:app --bind 0.0.0.0:$PORT
 ```
 
 **Requirements:**
@@ -205,7 +205,7 @@ This works but is less memorable for students. Use `BASE_URL` with this URL if n
 
 **Solution:** Already fixed in code via `ProxyFix` middleware. If you still see this:
 1. Verify `BASE_URL` starts with `https://`
-2. Check that ProxyFix is enabled in `frc_cam_gui_app.py`
+2. Check that ProxyFix is enabled in `bionicscam/app_server.py`
 3. Restart deployment
 
 ### Environment Variables Not Working

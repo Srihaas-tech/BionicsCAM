@@ -34,39 +34,39 @@ if [ $? -ne 0 ]; then
 fi
 
 # Check if post-processor exists
-if [ ! -f "frc_cam_postprocessor.py" ]; then
-    echo "❌ Error: frc_cam_postprocessor.py not found"
+if [ ! -f "bionicscam/postprocessor.py" ]; then
+    echo "❌ Error: bionicscam/postprocessor.py not found"
     echo "Please make sure it's in the same directory as this script"
     exit 1
 fi
 
 # Check if templates directory exists
-if [ ! -d "templates" ]; then
-    echo "❌ Error: templates/ directory not found"
+if [ ! -d "web_goblin/templates" ]; then
+    echo "❌ Error: web_goblin/templates/ directory not found"
     echo ""
     echo "You need this structure:"
     echo "  your-directory/"
-    echo "  ├── frc_cam_gui_app.py"
-    echo "  ├── frc_cam_postprocessor.py"
-    echo "  └── templates/"
+    echo "  ├── bionicscam/app_server.py"
+    echo "  ├── bionicscam/postprocessor.py"
+    echo "  └── web_goblin/templates/"
     echo "      └── index.html"
     echo ""
-    echo "Create templates directory and put index.html inside it:"
-    echo "  mkdir templates"
-    echo "  mv index.html templates/  (if index.html is in current directory)"
+    echo "Create web_goblin/templates and put index.html inside it:"
+    echo "  mkdir -p web_goblin/templates"
+    echo "  mv index.html web_goblin/templates/  (if index.html is in current directory)"
     exit 1
 fi
 
 # Check if index.html exists in templates
-if [ ! -f "templates/index.html" ]; then
-    echo "❌ Error: templates/index.html not found"
+if [ ! -f "web_goblin/templates/index.html" ]; then
+    echo "❌ Error: web_goblin/templates/index.html not found"
     echo ""
-    echo "index.html must be inside the templates/ directory"
+    echo "index.html must be inside web_goblin/templates/"
     echo ""
     if [ -f "index.html" ]; then
         echo "Found index.html in current directory. Moving it..."
-        mv index.html templates/
-        echo "✓ Fixed! index.html moved to templates/"
+        mv index.html web_goblin/templates/
+        echo "✓ Fixed! index.html moved to web_goblin/templates/"
     else
         echo "index.html not found. Please download it from /mnt/user-data/outputs/"
         exit 1
@@ -99,7 +99,7 @@ cleanup() {
         
         # Force kill if still running
         kill -9 $SERVER_PID 2>/dev/null
-        pkill -9 -f "frc_cam_gui_app.py" 2>/dev/null
+        pkill -9 -f "bionicscam.app_server" 2>/dev/null
     fi
     
     echo "✓ Server stopped"
@@ -111,7 +111,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # Start the server in background
-python3 frc_cam_gui_app.py &
+PORT=${PORT:-6238} python3 -m bionicscam.app_server &
 SERVER_PID=$!
 
 # Wait a moment for server to start

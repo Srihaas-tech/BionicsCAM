@@ -6,7 +6,7 @@
     "enabled": true
   },
   "assets": {
-    "directory": "templates"
+    "directory": "web_goblin/templates"
   },
   "compatibility_flags": [
     "nodejs_compat"

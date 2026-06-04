@@ -39,41 +39,41 @@ if %errorlevel% neq 0 (
 )
 
 REM Check if post-processor exists
-if not exist "frc_cam_postprocessor.py" (
-    echo Error: frc_cam_postprocessor.py not found
+if not exist "bionicscam\postprocessor.py" (
+    echo Error: bionicscam\postprocessor.py not found
     echo Please make sure it's in the same directory as this script
     pause
     exit /b 1
 )
 
 REM Check if templates directory exists
-if not exist "templates" (
-    echo Error: templates directory not found
+if not exist "web_goblin\templates" (
+    echo Error: web_goblin\templates directory not found
     echo.
     echo You need this structure:
     echo   your-directory\
-    echo   ├── frc_cam_gui_app.py
-    echo   ├── frc_cam_postprocessor.py
-    echo   └── templates\
+    echo   ├── bionicscam\app_server.py
+    echo   ├── bionicscam\postprocessor.py
+    echo   └── web_goblin\templates\
     echo       └── index.html
     echo.
-    echo Create templates directory and put index.html inside it:
-    echo   mkdir templates
-    echo   move index.html templates\
+    echo Create web_goblin\templates and put index.html inside it:
+    echo   mkdir web_goblin\templates
+    echo   move index.html web_goblin\templates\
     pause
     exit /b 1
 )
 
 REM Check if index.html exists in templates
-if not exist "templates\index.html" (
-    echo Error: templates\index.html not found
+if not exist "web_goblin\templates\index.html" (
+    echo Error: web_goblin\templates\index.html not found
     echo.
-    echo index.html must be inside the templates\ directory
+    echo index.html must be inside web_goblin\templates\
     echo.
     if exist "index.html" (
         echo Found index.html in current directory. Moving it...
-        move index.html templates\
-        echo Fixed! index.html moved to templates\
+        move index.html web_goblin\templates\
+        echo Fixed! index.html moved to web_goblin\templates\
     ) else (
         echo index.html not found. Please download it.
         pause
@@ -92,7 +92,8 @@ echo ==========================================
 echo.
 
 REM Start the server (not in background, so it can be killed properly)
-start "PenguinCAM Server" python frc_cam_gui_app.py
+start "PenguinCAM Server" set PORT=6238
+python -m bionicscam.app_server
 
 REM Wait a moment for server to start
 timeout /t 3 /nobreak >nul

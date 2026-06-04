@@ -71,13 +71,13 @@ Features are enabled/disabled based on team config:
 
 ### New Files
 
-- **`team_config.py`** - TeamConfig class for loading/managing config
+- **`bionicscam/team_config.py`** - TeamConfig class for loading/managing config
 - **`PenguinCAM-config-template.yaml`** - Template for teams to customize
 
 ### Modified Files
 
-- **`frc_cam_gui_app.py`** - Removed mandatory auth, added config loading
-- **`onshape_integration.py`** - Added `fetch_config_file()`, `get_user_session_info()`, `get_document_company()`
+- **`bionicscam/app_server.py`** - Removed mandatory auth, added config loading
+- **`bionicscam/integrations/onshape.py`** - Added `fetch_config_file()`, `get_user_session_info()`, `get_document_company()`
 - **`requirements.txt`** - Added flask-limiter and PyYAML dependencies
 
 ## Usage Flow
