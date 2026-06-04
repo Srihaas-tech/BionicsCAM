@@ -1978,14 +1978,12 @@ class OnshapeClient:
                                       selected_face_ids, selected_body_ids=None,
                                       multilayer=True):
         """
-        Export only the bodies that correspond to selected Onshape faces/bodies.
+        Export only user-selected Onshape faces as separate DXFs.
 
-        Onshape's iframe selection payload is annoyingly inconsistent: sometimes
-        the selected item is a raw face ID, sometimes it is a selection-path ID
-        that contains the real topology IDs, and sometimes it includes a body or
-        occurrence ID instead. This resolver intentionally tries all safe
-        selected-ID forms, but it never falls back to exporting the whole Part
-        Studio.
+        Important safety rule: this never falls back to exporting the whole Part
+        Studio. It first tries the selected IDs directly because the Onshape
+        iframe often gives IDs that are already valid for the DXF export API.
+        If that fails, it tries the slower bodydetails resolver as a fallback.
         """
         log(f"\n{'='*70}")
         log(f"MULTI-PART EXPORT: selected Onshape entities -> individual DXFs ({'2.5D' if multilayer else '2D'})")
@@ -2000,32 +1998,67 @@ class OnshapeClient:
             log("⚠️  No selected face/body IDs supplied")
             return []
 
+        def clean_export_id(raw_id):
+            """Prefer the most export-looking token from an Onshape selection path."""
+            text = str(raw_id or '').strip()
+            if not text:
+                return ''
+            tokens = [t for t in re.split(r'[^A-Za-z0-9_\-]+', text) if t]
+            # Topology IDs are commonly long compact tokens. Prefer the last long
+            # token because selection paths often end with the selected entity.
+            long_tokens = [t for t in tokens if len(t) >= 8]
+            return long_tokens[-1] if long_tokens else text
+
+        # Fast path: try the selected face IDs directly. This avoids the Vercel
+        # timeout/crash goblin caused by over-resolving bodydetails before export.
+        results = []
+        seen_ids = set()
+        for index, raw_face_id in enumerate(selected_face_ids, start=1):
+            face_id = clean_export_id(raw_face_id)
+            if not face_id or face_id in seen_ids:
+                continue
+            seen_ids.add(face_id)
+
+            log(f"\n--- Direct selected-face export {index}: {face_id} ---")
+            try:
+                dxf_content = self.export_face_to_dxf(
+                    document_id, workspace_id, element_id,
+                    face_id=face_id,
+                    body_id=None,
+                    face_normal=None
+                )
+            except Exception as direct_error:
+                log(f"⚠️  Direct selected-face export failed for {face_id}: {direct_error}")
+                dxf_content = None
+
+            if dxf_content:
+                safe_name = f"selected_part_{index:02d}"
+                results.append({
+                    'content': dxf_content,
+                    'filename': f"{safe_name}.dxf",
+                    'body_id': '',
+                    'part_name': safe_name,
+                    'source_face_id': face_id,
+                })
+                log(f"✅ Direct selected-face export worked for {face_id} ({len(dxf_content)} bytes)")
+
+        if results:
+            log(f"✅ Direct selected-face export produced {len(results)} DXF(s); skipping whole-studio fallback")
+            return results
+
+        log("⚠️  Direct selected-face export produced zero DXFs; trying selected body/face resolver")
+
         def id_candidates(raw_id):
-            """Return possible real Onshape IDs from a raw selection ID/path."""
             if raw_id is None:
                 return set()
-
             text = str(raw_id).strip()
             if not text:
                 return set()
-
             candidates = {text}
-
-            # Selection paths commonly use delimiters like ',', '/', ':', ';', '|'.
-            # Keep full tokens and also strip common wrappers. Onshape topology IDs
-            # are normally compact alphanumeric J... IDs, so this is safe.
             for token in re.split(r'[^A-Za-z0-9_\-]+', text):
-                token = token.strip()
-                if token:
-                    candidates.add(token)
-                    candidates.add(token.strip('[](){}'))
-
-            # Some selection IDs look like query-ish strings. Split equals signs too.
-            for token in re.split(r'[=]', text):
                 token = token.strip().strip('[](){}')
                 if token:
                     candidates.add(token)
-
             return {c for c in candidates if c}
 
         face_candidate_set = set()
@@ -2035,45 +2068,39 @@ class OnshapeClient:
         body_candidate_set = set()
         for bid in selected_body_ids:
             body_candidate_set.update(id_candidates(bid))
-
-        # Body IDs can also be embedded inside face selection paths, so include
-        # those path tokens as possible body candidates too.
         for fid in selected_face_ids:
             body_candidate_set.update(id_candidates(fid))
 
-        faces_data = self.list_faces(document_id, workspace_id, element_id)
-        if not faces_data:
-            log("❌ list_faces returned None – cannot resolve selected faces/bodies")
-            return []
+        try:
+            faces_data = self.list_faces(document_id, workspace_id, element_id)
+            if not faces_data:
+                log("❌ list_faces returned None – cannot resolve selected faces/bodies")
+                return []
 
-        bodies_with_faces = self.get_body_faces(
-            document_id, workspace_id, element_id,
-            cached_faces_data=faces_data
-        )
-        if not bodies_with_faces:
-            log("❌ get_body_faces returned None – cannot resolve selected bodies")
+            bodies_with_faces = self.get_body_faces(
+                document_id, workspace_id, element_id,
+                cached_faces_data=faces_data
+            )
+            if not bodies_with_faces:
+                log("❌ get_body_faces returned None – cannot resolve selected bodies")
+                return []
+        except Exception as resolver_error:
+            log(f"❌ Selected-face resolver crashed before export: {resolver_error}")
+            log(traceback.format_exc())
             return []
-
-        log(f"Resolver face candidates: {sorted(face_candidate_set)}")
-        log(f"Resolver body candidates: {sorted(body_candidate_set)}")
-        log(f"Available bodies: {list(bodies_with_faces.keys())}")
 
         selected_by_body = {}
 
         def add_body_selection(bid, body_data, face=None, reason='selected body'):
             if bid in selected_by_body:
                 return
-
             faces = body_data.get('faces', [])
             ref_face = face
             if not ref_face and faces:
-                # Largest planar/available face is the safest reference face.
                 ref_face = max(faces, key=lambda f: f.get('area', 0) or 0)
-
             if not ref_face:
-                log(f"⚠️  Body {bid} ({body_data.get('name', 'Part')}) has no usable faces; skipping")
+                log(f"⚠️  Body {bid} has no usable faces; skipping")
                 return
-
             selected_by_body[bid] = {
                 'body_id': bid,
                 'part_name': body_data.get('name', 'Part'),
@@ -2084,20 +2111,14 @@ class OnshapeClient:
             }
             log(f"✅ {reason}: body {bid} ({body_data.get('name', 'Part')}) using face {ref_face.get('id')}")
 
-        # 1) Direct/embedded body ID resolution.
         for bid, body_data in bodies_with_faces.items():
-            bid_candidates = id_candidates(bid)
-            if bid_candidates & body_candidate_set:
+            if id_candidates(bid) & body_candidate_set:
                 add_body_selection(bid, body_data, reason='selected body ID/path')
 
-        # 2) Direct/embedded face ID resolution.
         for bid, body_data in bodies_with_faces.items():
             for face in body_data.get('faces', []):
                 fid = face.get('id')
-                if not fid:
-                    continue
-                fid_candidates = id_candidates(fid)
-                if fid_candidates & face_candidate_set:
+                if fid and (id_candidates(fid) & face_candidate_set):
                     add_body_selection(bid, body_data, face=face, reason='selected face ID/path')
 
         if not selected_by_body:
@@ -2110,20 +2131,18 @@ class OnshapeClient:
                         break
                 if len(sample_faces) >= 12:
                     break
-
             log("❌ None of the selected IDs resolved to solid bodies")
             log(f"   Selected face raw IDs: {selected_face_ids}")
             log(f"   Selected body raw IDs: {selected_body_ids}")
             log(f"   Sample available body:face IDs: {sample_faces}")
             return []
 
-        results = []
-        for bid, item in selected_by_body.items():
+        for index, (bid, item) in enumerate(selected_by_body.items(), start=1):
             part_name = item['part_name']
             face_id = item['face_id']
             face_normal = item['normal']
             reference_origin = item['origin']
-            log(f"\n--- Exporting selected body {bid} ({part_name}) from face {face_id} [{item.get('reason')}] ---")
+            log(f"\n--- Exporting resolved selected body {bid} ({part_name}) from face {face_id} [{item.get('reason')}] ---")
 
             dxf_content = None
             if multilayer:
@@ -2137,27 +2156,27 @@ class OnshapeClient:
                         body_id=bid,
                         cached_faces_data=faces_data
                     )
-                    if isinstance(export_result, tuple):
-                        dxf_content, _ = export_result
-                    else:
-                        dxf_content = export_result
+                    dxf_content = export_result[0] if isinstance(export_result, tuple) else export_result
                 except Exception as multilayer_error:
                     log(f"⚠️  2.5D export failed for selected body {bid}; falling back to 2D: {multilayer_error}")
-                    dxf_content = None
 
             if not dxf_content:
-                dxf_content = self.export_face_to_dxf(
-                    document_id, workspace_id, element_id,
-                    face_id=face_id,
-                    body_id=bid,
-                    face_normal=face_normal
-                )
+                try:
+                    dxf_content = self.export_face_to_dxf(
+                        document_id, workspace_id, element_id,
+                        face_id=face_id,
+                        body_id=bid,
+                        face_normal=face_normal
+                    )
+                except Exception as face_error:
+                    log(f"⚠️  2D export failed for selected body {bid}: {face_error}")
+                    dxf_content = None
 
             if not dxf_content:
                 log(f"⚠️  DXF export returned nothing for selected body {bid} – skipping")
                 continue
 
-            safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or bid
+            safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or f"selected_part_{index:02d}"
             results.append({
                 'content': dxf_content,
                 'filename': f"{safe_name}.dxf",
@@ -2168,7 +2187,7 @@ class OnshapeClient:
             log(f"✅ Exported selected body {bid} ({part_name}) → {safe_name}.dxf ({len(dxf_content)} bytes)")
 
         log(f"\n{'='*70}")
-        log(f"SELECTED MULTI-PART EXPORT complete: {len(results)}/{len(selected_by_body)} selected bodies exported")
+        log(f"SELECTED MULTI-PART EXPORT complete: {len(results)} DXF(s)")
         log(f"{'='*70}\n")
         return results
 
