@@ -187,7 +187,24 @@
         const ids = [];
 
         for (const sel of selectedSelections) {
-            const id = sel.selectionId || sel.faceId || sel.id;
+            // Prefer the raw face/entity id when Onshape provides it.
+            // selectionId can be a higher-level selection path that does not
+            // always match the Part Studio bodydetails face id.
+            const id = sel.faceId || sel.id || sel.selectionId;
+
+            if (id && !ids.includes(id)) {
+                ids.push(id);
+            }
+        }
+
+        return ids;
+    }
+
+    function getSelectedBodyIds() {
+        const ids = [];
+
+        for (const sel of selectedSelections) {
+            const id = sel.bodyId || sel.partId || sel.partIdString;
 
             if (id && !ids.includes(id)) {
                 ids.push(id);
@@ -283,8 +300,9 @@
     function handleImportAllParts() {
         const isMultilayer = multilayerCheckbox && multilayerCheckbox.checked;
         const selectedFaceIds = getSelectedFaceIds();
+        const selectedBodyIds = getSelectedBodyIds();
 
-        if (!selectedFaceIds.length) {
+        if (!selectedFaceIds.length && !selectedBodyIds.length) {
             instruction.innerHTML = 'Select one or more faces first, then import the selected part(s).';
             instruction.style.color = '#b45309';
             instruction.style.display = 'block';
@@ -299,12 +317,13 @@
             multilayer: isMultilayer ? 'true' : 'false',
             multi: 'true',
             selectedOnly: 'true',
-            faceIds: selectedFaceIds.join(',')
+            faceIds: selectedFaceIds.join(','),
+            bodyIds: selectedBodyIds.join(',')
         });
 
         const url = `${context.baseUrl}/onshape/import?${params.toString()}`;
 
-        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds);
+        console.log('Opening BionicsCAM multi-part import:', url, 'selectedFaceIds=', selectedFaceIds, 'selectedBodyIds=', selectedBodyIds);
 
         window.open(url, '_blank');
     }
