@@ -1833,6 +1833,9 @@ def onshape_import():
                     if pid and pid not in body_id_hints:
                         body_id_hints.append(pid)
 
+            raw_selections = raw_params.get('rawSelections', '').strip()
+            if raw_selections:
+                log(f"🔍 raw Onshape selections from panel: {raw_selections[:1000]}")
             log(f"🔍 face IDs from panel: {selected_face_ids}, body ID hints: {body_id_hints}")
 
             # If no real face IDs but we have body IDs, auto-select the top
@@ -1863,7 +1866,12 @@ def onshape_import():
             else:
                 log("❌ Multi-part import requested but no selected face IDs were provided; refusing to export the entire Part Studio")
                 return jsonify({
-                    'error': 'No Onshape faces were selected for multi-part import. Select one flat face per part, then import again.'
+                    'error': 'No Onshape faces were selected for multi-part import. Select one flat face per part, then import again.',
+                    'debug': {
+                        'received_faceIds': selected_face_ids_raw,
+                        'received_partIds': part_ids_raw,
+                        'received_rawSelections_count': 1 if raw_selections else 0
+                    }
                 }), 400
 
             if not part_exports:
