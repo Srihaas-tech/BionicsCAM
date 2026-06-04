@@ -3673,7 +3673,7 @@ class FRCPostProcessor:
 
             # Helper function to process a segment with tab checking
             def process_segment(p1, p2, seg_start_dist, seg_length):
-                nonlocal tab_number, current_z, tab_waypoints_by_idx
+                nonlocal tab_number, current_z
 
                 if seg_length == 0:
                     return
