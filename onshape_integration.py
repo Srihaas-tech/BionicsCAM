@@ -55,6 +55,8 @@ class OnshapeClient:
         self.refresh_token = None
         self.token_expires = None
         self._auth_mode_logged = False
+        self.last_onshape_api_error = None
+        self.last_api_limit_error = None
     
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
@@ -272,6 +274,28 @@ class OnshapeClient:
             if not self.refresh_access_token():
                 raise ValueError("Token expired and refresh failed")
     
+    def _record_onshape_response(self, method, endpoint, response):
+        """Capture safe diagnostics for the last Onshape API response."""
+        try:
+            status_code = getattr(response, 'status_code', None)
+            preview = getattr(response, 'text', '') or ''
+            debug = {
+                'auth_mode': 'api_key' if self.has_api_key_auth() else 'oauth',
+                'method': method,
+                'endpoint': endpoint,
+                'status_code': status_code,
+                'content_type': response.headers.get('content-type', '') if hasattr(response, 'headers') else '',
+                'response_preview': preview[:1000],
+            }
+            if status_code and status_code >= 400:
+                self.last_onshape_api_error = debug
+                if status_code in (402, 429):
+                    self.last_api_limit_error = debug
+            elif status_code and status_code < 400:
+                self.last_onshape_api_error = None
+        except Exception as exc:
+            log(f"Could not record Onshape response diagnostics: {exc}")
+
     def _make_api_request(self, method, endpoint, **kwargs):
         """
         Make an authenticated API request to Onshape.
@@ -297,11 +321,15 @@ class OnshapeClient:
                 headers=headers,
                 has_json_body=('json' in kwargs and kwargs.get('json') is not None),
             )
-            return requests.request(method, url, headers=signed_headers, **request_kwargs)
+            response = requests.request(method, url, headers=signed_headers, **request_kwargs)
+            self._record_onshape_response(method, endpoint, response)
+            return response
 
         self._ensure_valid_token()
         headers['Authorization'] = f'Bearer {self.access_token}'
-        return requests.request(method, url, headers=headers, **request_kwargs)
+        response = requests.request(method, url, headers=headers, **request_kwargs)
+        self._record_onshape_response(method, endpoint, response)
+        return response
     
     def get_user_info(self):
         """Get information about the authenticated user"""
