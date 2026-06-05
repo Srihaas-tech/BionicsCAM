@@ -594,8 +594,10 @@ def render_onshape_picker(**context):
     context.setdefault('documents', [])
     context.setdefault('part_studios', [])
     context.setdefault('parts', [])
+    context.setdefault('faces', [])
     context.setdefault('selected_document', None)
     context.setdefault('selected_part_studio', None)
+    context.setdefault('selected_part', None)
     context.setdefault('error_message', None)
     context.setdefault('onshape_connected', session.get('onshape_authenticated', False))
     return render_template('onshape_picker.html', **context)
@@ -1435,6 +1437,7 @@ def onshape_picker():
     document_id = request.args.get('documentId') or request.args.get('did')
     workspace_id = request.args.get('workspaceId') or request.args.get('wid')
     element_id = request.args.get('elementId') or request.args.get('eid')
+    body_id = request.args.get('bodyId') or request.args.get('partId') or request.args.get('bid')
 
     try:
         # Step 1: document list/search
@@ -1487,21 +1490,71 @@ def onshape_picker():
             'name': element_info.get('name') or 'Selected Part Studio',
             'href': f'https://cad.onshape.com/documents/{document_id}/w/{workspace_id}/e/{element_id}'
         }
-        parts = client.list_parts_for_import(document_id, workspace_id, element_id)
-        session_manager.update_session_tokens(client)
 
-        if len(parts) == 1:
-            body_id = parts[0]['body_id']
-            return redirect(
-                f"/onshape/import?documentId={document_id}&workspaceId={workspace_id}&elementId={element_id}&bodyId={body_id}&multilayer=true"
+        # Choose the body first. If there is only one body, still continue to the
+        # face/cut-plane screen instead of importing immediately; complex plates
+        # can have many planar faces, and guessing the wrong one breaks export.
+        if not body_id:
+            parts = client.list_parts_for_import(document_id, workspace_id, element_id)
+            session_manager.update_session_tokens(client)
+
+            if len(parts) == 1:
+                only_body = parts[0]['body_id']
+                return redirect(
+                    f"/onshape/picker?documentId={document_id}&workspaceId={workspace_id}&elementId={element_id}&bodyId={only_body}"
+                )
+
+            return render_onshape_picker(
+                step='part',
+                selected_document=selected_document,
+                selected_part_studio=selected_part_studio,
+                parts=parts,
+                error_message=None if parts else 'No solid parts/bodies were found in this Part Studio.'
             )
 
+        # Step 4: select the exact planar face/cut plane for the selected body.
+        bodies_with_faces = client.get_body_faces(document_id, workspace_id, element_id, body_id=body_id)
+        session_manager.update_session_tokens(client)
+        body_data = (bodies_with_faces or {}).get(body_id)
+        if not body_data:
+            return render_onshape_picker(
+                step='part',
+                selected_document=selected_document,
+                selected_part_studio=selected_part_studio,
+                parts=client.list_parts_for_import(document_id, workspace_id, element_id),
+                error_message=f'Could not find body {body_id} in this Part Studio. Choose the part again.'
+            ), 400
+
+        selected_part = {
+            'body_id': body_id,
+            'name': body_data.get('name') or body_id,
+            'href': selected_part_studio['href'],
+        }
+        faces = []
+        for face in body_data.get('faces', []):
+            if face.get('surfaceType') != 'PLANE':
+                continue
+            normal = face.get('normal') or {}
+            area_m2 = face.get('area', 0) or 0
+            faces.append({
+                'face_id': face.get('id'),
+                'area': area_m2,
+                'area_in2': area_m2 * 1550.0031,
+                'normal': normal,
+                'normal_label': f"({normal.get('x', 0):.3f}, {normal.get('y', 0):.3f}, {normal.get('z', 0):.3f})",
+                'is_recommended': False,
+            })
+        faces.sort(key=lambda f: f.get('area', 0), reverse=True)
+        if faces:
+            faces[0]['is_recommended'] = True
+
         return render_onshape_picker(
-            step='part',
+            step='face',
             selected_document=selected_document,
             selected_part_studio=selected_part_studio,
-            parts=parts,
-            error_message=None if parts else 'No solid parts/bodies were found in this Part Studio.'
+            selected_part=selected_part,
+            faces=faces,
+            error_message=None if faces else 'No planar faces were found on this part. Choose a different body or use manual DXF export.'
         )
 
     except Exception as e:
@@ -1931,7 +1984,10 @@ def onshape_import():
                 'documentId': document_id,
                 'workspaceId': workspace_id,
                 'elementId': element_id,
-                'faceId': face_id
+                'faceId': face_id,
+                'bodyId': body_id,
+                'multilayer': raw_params.get('multilayer'),
+                'fromPicker': raw_params.get('fromPicker')
             }
 
             # Redirect to Onshape OAuth
@@ -2184,6 +2240,9 @@ def onshape_import():
         multilayer = raw_params.get('multilayer', 'true').lower() in ('true', '1', 'yes')
 
         # Fetch DXF from Onshape
+        if hasattr(client, '_reset_export_errors'):
+            client._reset_export_errors()
+
         # Use body_id from URL parameter if provided, otherwise use the one from auto-selection
         export_body_id = body_id if body_id else auto_selected_body_id
         log(f"Exporting with body_id: {export_body_id} (from {'URL param' if body_id else 'auto-selection'})")
@@ -2281,6 +2340,13 @@ def onshape_import():
                 # Backwards compatibility if export function doesn't return thickness
                 dxf_content = result
                 detected_thickness = None
+
+            if not dxf_content:
+                log("⚠️  Multi-layer export did not produce DXF; falling back to selected-part 2D export")
+                dxf_content = client.export_face_to_dxf(
+                    document_id, workspace_id, element_id, face_id, export_body_id, face_normal
+                )
+                detected_thickness = None
         else:
             log("📄 Single-layer export")
             dxf_content = client.export_face_to_dxf(
@@ -2303,7 +2369,9 @@ def onshape_import():
                     'face_id': face_id,
                     'body_id': export_body_id,
                     'document_id': document_id,
-                    'element_id': element_id
+                    'element_id': element_id,
+                    'export_errors': getattr(client, 'last_export_errors', []),
+                    'last_onshape_export_error': getattr(client, 'last_onshape_export_error', None)
                 }
             }), 500
         
