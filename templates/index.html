@@ -3,16 +3,831 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bionics - Team 4909</title>
+    <title>BionicsCAM — Team 4909</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/png" href="/static/bionicslogo.png">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <script defer src="https://cdn.vercel-insights.com/v1/script.js"></script>
-    <!--Test Commit-->
+
     <!-- Vercel Speed Insights -->
     <script>
         window.si = window.si || function () { (window.siq = window.siq || []).push(arguments); };
     </script>
     <script defer src="/_vercel/speed-insights/script.js"></script>
+
+    <style>
+        :root {
+            --primary: #0F4F3A;
+            --primary-dark: #0B3A2B;
+            --primary-light: #1a6b50;
+            --accent: #2ecc71;
+            --accent-dim: rgba(46, 204, 113, 0.15);
+            --bg: #0a0e0c;
+            --bg-card: #111815;
+            --bg-card-hover: #161f1c;
+            --surface: #111815;
+            --surface-light: #161f1c;
+            --secondary: #1e2e28;
+            --border: #1e2e28;
+            --border-light: #264038;
+            --text: #e8f0ec;
+            --text-dim: #7a9e8e;
+            --text-muted: #4a6a5a;
+            --success: #2ecc71;
+            --warning: #d99f12;
+            --error: #ff5c5c;
+            --mono: 'DM Mono', monospace;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(15, 79, 58, 0.04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(15, 79, 58, 0.04) 1px, transparent 1px);
+            background-size: 32px 32px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            height: 64px;
+            padding: 0 2rem;
+            background: rgba(10, 14, 12, 0.92);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .header-left,
+        .header-actions,
+        .user-info,
+        .user-details {
+            display: flex;
+            align-items: center;
+        }
+
+        .header-left { gap: 1rem; min-width: 0; }
+        .header-actions { gap: 0.75rem; margin-left: auto; }
+        .user-info { gap: 0.75rem; margin-left: 0; padding-left: 0; border-left: 0; }
+        .user-details { gap: 0.45rem; }
+
+        .logo-wrap {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: var(--text);
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .logo-wrap img {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+        }
+
+        .logo-text {
+            font-family: 'Syne', sans-serif;
+            font-size: 1.25rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+        }
+
+        .logo-text span { color: var(--accent); }
+
+        .divider {
+            width: 1px;
+            height: 24px;
+            background: var(--border-light);
+            flex: 0 0 auto;
+        }
+
+        .page-title {
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        .config-pill {
+            display: flex;
+            align-items: center;
+            max-width: 360px;
+            padding: 0.45rem 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: rgba(17, 24, 21, 0.85);
+            color: var(--text-dim);
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .config-pill a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .config-pill a:hover { text-decoration: underline; }
+        .config-pill-default { color: var(--text-muted); }
+
+        .nav-btn,
+        .logout-btn,
+        .icon-btn,
+        .mini-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.45rem;
+            width: auto;
+            padding: 0.5rem 0.95rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-light);
+            border-radius: 8px;
+            color: var(--text-dim);
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            font-weight: 500;
+            text-decoration: none;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .nav-btn:hover,
+        .logout-btn:hover,
+        .icon-btn:hover,
+        .mini-btn:hover {
+            background: var(--bg-card-hover);
+            color: var(--text);
+            border-color: var(--primary-light);
+            transform: translateY(-1px);
+            box-shadow: none;
+        }
+
+        .nav-btn.primary-link,
+        .mini-btn.primary-link {
+            background: var(--primary);
+            border-color: var(--primary);
+            color: #fff;
+        }
+
+        .nav-btn.primary-link:hover,
+        .mini-btn.primary-link:hover {
+            background: var(--primary-light);
+            border-color: var(--primary-light);
+            box-shadow: 0 4px 12px rgba(15, 79, 58, 0.35);
+        }
+
+        .user-icon,
+        .user-name {
+            color: var(--text-dim);
+            font-family: var(--mono);
+            font-size: 0.8rem;
+        }
+
+        main {
+            position: relative;
+            z-index: 1;
+            max-width: 1480px;
+            margin: 0 auto;
+            padding: 3rem 2rem;
+        }
+
+        .hero {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 2rem;
+            align-items: end;
+            margin-bottom: 2rem;
+        }
+
+        .eyebrow {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            color: var(--accent);
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            margin-bottom: 0.7rem;
+        }
+
+        .hero h1 {
+            font-family: 'Syne', sans-serif;
+            font-size: clamp(2.25rem, 5vw, 4.5rem);
+            line-height: 0.95;
+            font-weight: 800;
+            letter-spacing: -0.055em;
+            margin: 0;
+            color: var(--text);
+        }
+
+        .hero h1 span { color: var(--accent); }
+
+        .hero p {
+            max-width: 660px;
+            margin-top: 1rem;
+            color: var(--text-dim);
+            font-size: 0.98rem;
+        }
+
+        .hero-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .workflow {
+            display: grid;
+            grid-template-columns: minmax(360px, 460px) minmax(0, 1fr);
+            gap: 1.5rem;
+            align-items: start;
+        }
+
+        .stack {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .panel {
+            position: relative;
+            overflow: hidden;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.25rem 1.5rem;
+            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.14);
+        }
+
+        .panel::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: var(--primary-light);
+            opacity: 0.65;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            margin-bottom: 1.25rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .step-number {
+            width: 28px;
+            height: 28px;
+            flex: 0 0 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--accent-dim);
+            border: 1px solid rgba(46, 204, 113, 0.28);
+            border-radius: 8px;
+            color: var(--accent);
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .panel-title {
+            font-family: 'Syne', sans-serif;
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .panel-subtitle {
+            margin-left: auto;
+            font-family: var(--mono);
+            font-size: 0.68rem;
+            color: var(--text-muted);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .drop-zone {
+            position: relative;
+            border: 1px dashed var(--border-light);
+            border-radius: 12px;
+            padding: 2.6rem 1.5rem;
+            background:
+                radial-gradient(circle at top, rgba(46, 204, 113, 0.10), transparent 42%),
+                var(--bg);
+            color: var(--text);
+            cursor: pointer;
+            transition: all 0.22s ease;
+        }
+
+        .drop-zone:hover,
+        .drop-zone.dragover {
+            border-color: var(--accent);
+            background:
+                radial-gradient(circle at top, rgba(46, 204, 113, 0.16), transparent 46%),
+                var(--bg-card-hover);
+            transform: translateY(-1px);
+        }
+
+        .drop-zone-icon::before {
+            content: 'DXF';
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 58px;
+            height: 58px;
+            margin-bottom: 1rem;
+            border: 1px solid var(--border-light);
+            border-radius: 14px;
+            background: rgba(15, 79, 58, 0.18);
+            color: var(--accent);
+            font-family: var(--mono);
+            font-size: 0.9rem;
+        }
+
+        .drop-zone-text {
+            font-family: 'Syne', sans-serif;
+            font-size: 1.15rem;
+            font-weight: 700;
+        }
+
+        .drop-zone-hint {
+            margin-top: 0.35rem;
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+
+        .file-info {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1rem;
+        }
+
+        .file-info-icon::before {
+            content: 'NC';
+            display: inline-flex;
+            width: 42px;
+            height: 42px;
+            align-items: center;
+            justify-content: center;
+            border-radius: 10px;
+            background: var(--accent-dim);
+            color: var(--accent);
+            font-family: var(--mono);
+            font-size: 0.8rem;
+        }
+
+        .file-info-name {
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .file-info-size,
+        .upload-different a {
+            color: var(--text-dim);
+            font-family: var(--mono);
+            font-size: 0.78rem;
+        }
+
+        .upload-different a:hover { color: var(--accent); }
+
+        .param-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .param-group {
+            margin-bottom: 1rem;
+        }
+
+        .param-grid .param-group { margin-bottom: 0; }
+        .span-2 { grid-column: 1 / -1; }
+
+        label {
+            margin-bottom: 0.45rem;
+            color: var(--text);
+            font-family: var(--mono);
+            font-size: 0.74rem;
+            font-weight: 500;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+
+        .label-hint {
+            display: block;
+            margin: 0.15rem 0 0;
+            color: var(--text-muted);
+            font-family: 'Inter', sans-serif;
+            font-size: 0.75rem;
+            font-weight: 400;
+            letter-spacing: 0;
+            text-transform: none;
+        }
+
+        input[type="number"],
+        select {
+            width: 100%;
+            background-color: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 8px;
+            padding: 0.75rem 0.8rem;
+            font-family: var(--mono);
+            font-size: 0.88rem;
+            transition: all 0.2s ease;
+        }
+
+        input[type="number"]:focus,
+        select:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(46, 204, 113, 0.12);
+        }
+
+        select option {
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        input[type="checkbox"] {
+            accent-color: var(--accent);
+        }
+
+        .check-card {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.7rem;
+            padding: 0.85rem;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--bg);
+        }
+
+        .check-card label {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            margin: 0;
+            text-transform: none;
+            letter-spacing: 0;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.9rem;
+        }
+
+        .section-rule {
+            border-bottom: 1px solid var(--border);
+            margin: 1.1rem 0;
+        }
+
+        .action-card {
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+        }
+
+        .generate-row,
+        .button-group {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0.75rem;
+        }
+
+        button,
+        .primary,
+        .secondary {
+            width: 100%;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            padding: 0.85rem 1rem;
+            font-family: var(--mono);
+            font-size: 0.86rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        button,
+        button.primary,
+        #generateBtn,
+        #driveBtn {
+            background: var(--primary);
+            color: #fff;
+            border-color: var(--primary);
+        }
+
+        button:hover,
+        button.primary:hover,
+        #generateBtn:hover,
+        #driveBtn:hover {
+            background: var(--primary-light);
+            border-color: var(--primary-light);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(15, 79, 58, 0.35);
+        }
+
+        button:disabled,
+        #generateBtn:disabled,
+        #downloadBtn:disabled,
+        #driveBtn:disabled {
+            background: var(--border);
+            border-color: var(--border);
+            color: var(--text-muted);
+            opacity: 0.7;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        button.secondary,
+        #downloadBtn,
+        .icon-button,
+        .mode-button,
+        .playback-button {
+            background: var(--bg);
+            color: var(--text-dim);
+            border: 1px solid var(--border-light);
+        }
+
+        button.secondary:hover,
+        #downloadBtn:hover,
+        .icon-button:hover,
+        .mode-button:hover,
+        .playback-button:hover {
+            background: var(--bg-card-hover);
+            color: var(--text);
+            border-color: var(--primary-light);
+            box-shadow: none;
+        }
+
+        #downloadBtn:not(:disabled) {
+            background: var(--bg);
+            color: var(--text);
+            border-color: var(--border-light);
+        }
+
+        .loading {
+            padding: 1.25rem;
+            color: var(--text-dim);
+            font-family: var(--mono);
+            font-size: 0.85rem;
+        }
+
+        .spinner {
+            border-color: var(--border);
+            border-top-color: var(--accent);
+        }
+
+        .alert,
+        .results,
+        .controls,
+        .scrubber-container,
+        .setup-controls,
+        .stock-size-display {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+
+        .alert.error {
+            color: #ff8b8b;
+            border-color: rgba(255, 92, 92, 0.36);
+            background: rgba(255, 92, 92, 0.08);
+        }
+
+        .alert.info {
+            color: var(--text-dim);
+            border-color: rgba(91, 163, 245, 0.3);
+            background: rgba(91, 163, 245, 0.08);
+        }
+
+        .warning-message {
+            color: #f3c461;
+            border-color: rgba(217, 159, 18, 0.35);
+            background: rgba(217, 159, 18, 0.08);
+        }
+
+        .info-message {
+            color: #9ac3ff;
+            border-color: rgba(91, 163, 245, 0.3) !important;
+            background: rgba(91, 163, 245, 0.08) !important;
+            border-radius: 8px;
+        }
+
+        .results {
+            border-left: 3px solid var(--accent);
+        }
+
+        .results-title,
+        .stat-value,
+        .stock-size-value,
+        .rotation-display {
+            color: var(--accent);
+        }
+
+        .stats {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .stat,
+        .console-output {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+
+        .stat-label {
+            font-family: var(--mono);
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+
+        .visualizer {
+            position: sticky;
+            top: 88px;
+        }
+
+        #canvas-container,
+        #dxfSetupCanvas {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+
+        #canvas-container {
+            height: 610px;
+        }
+
+        #dxf-setup-container {
+            background: transparent;
+            padding: 0;
+        }
+
+        .setup-label,
+        .controls-label,
+        .scrubber-operation,
+        .speed-control label {
+            color: var(--text-dim);
+        }
+
+        .mode-toggle {
+            gap: 0.45rem;
+        }
+
+        .mode-button {
+            width: auto;
+            padding: 0.45rem 0.75rem;
+            border-radius: 7px;
+        }
+
+        .mode-button.active,
+        .playback-button.playing {
+            background: var(--primary);
+            color: #fff;
+            border-color: var(--primary);
+        }
+
+        .playback-controls {
+            border-top-color: var(--border);
+        }
+
+        .playback-button {
+            width: 40px;
+            height: 40px;
+            padding: 0;
+            flex: 0 0 40px;
+        }
+
+        .speed-select {
+            width: auto;
+            min-width: 110px;
+        }
+
+        .controls {
+            align-items: center;
+        }
+
+        .icon-button {
+            width: auto;
+            padding: 0.55rem 0.9rem;
+        }
+
+        .modal-overlay {
+            background: rgba(10, 14, 12, 0.92);
+            backdrop-filter: blur(12px);
+        }
+
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border-light);
+            border-radius: 14px;
+        }
+
+        .modal-header {
+            font-family: 'Syne', sans-serif;
+            color: var(--text);
+        }
+
+        .part-option {
+            background: var(--bg);
+            border-color: var(--border);
+        }
+
+        .part-option:hover,
+        .part-option.selected {
+            border-color: var(--accent);
+            background: var(--bg-card-hover);
+            box-shadow: 0 0 0 2px rgba(46, 204, 113, 0.12);
+        }
+
+        .part-badge {
+            background: var(--accent-dim);
+            color: var(--accent);
+            border: 1px solid rgba(46, 204, 113, 0.28);
+        }
+
+        footer {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            border-top: 1px solid var(--border);
+            margin-top: 2rem;
+        }
+
+        @media (max-width: 1200px) {
+            .workflow { grid-template-columns: 1fr; }
+            .visualizer { position: static; }
+            #canvas-container { height: 560px; }
+        }
+
+        @media (max-width: 900px) {
+            header {
+                height: auto;
+                min-height: 64px;
+                flex-wrap: wrap;
+                padding: 0.85rem 1rem;
+            }
+
+            .header-actions {
+                width: 100%;
+                justify-content: flex-start;
+                flex-wrap: wrap;
+            }
+
+            .config-pill { max-width: 100%; }
+            main { padding: 2rem 1rem; }
+            .hero { grid-template-columns: 1fr; align-items: start; }
+            .hero-actions { justify-content: flex-start; }
+            .param-grid { grid-template-columns: 1fr; }
+            .span-2 { grid-column: auto; }
+        }
+
+        @media (max-width: 640px) {
+            .page-title,
+            .divider,
+            .user-name { display: none; }
+            .panel { padding: 1rem; }
+            #canvas-container { height: 440px; }
+            .controls,
+            .playback-controls,
+            .button-group { flex-wrap: wrap; }
+        }
+    </style>
 </head>
 <body>
     <!-- Part Selection Modal (shown when multiple parts detected) -->
@@ -45,82 +860,68 @@
     {% endif %}
 
     <header>
-        <div class="logo-container">
-            <img src="/static/bionicslogo.png" alt="Bionics Logo">
-        </div>
-        <div class="header-content">
-            <h1><span class="accent">Bionics</span>CAM</h1>
-            <p class="subtitle">FRC Team 4909 • Generate G-code from Onshape for CNC machining</p>
+        <div class="header-left">
+            <a href="/" class="logo-wrap">
+                <img src="/static/bionicslogo.png" alt="4909">
+                <span class="logo-text"><span>Bionics</span>CAM</span>
+            </a>
+            <div class="divider"></div>
+            <span class="page-title">CAM Generator</span>
         </div>
 
-        <!-- Config status (in the middle) -->
-        <div class="config-info">
+        <div class="header-actions">
             {% if session.get('team_config') and session.get('team_config').get('team_number') %}
             {% set _config_url = session.get('team_config_url') %}
-            <p class="config-status">Team configuration:
+            <div class="config-pill" title="Team configuration">
+                Team configuration:&nbsp;
                 {% if _config_url %}
-                <a href="{{ _config_url }}" target="_blank" rel="noopener">{{ session.get('team_config').get('team_number') }} ({{ session.get('team_config').get('team_name', 'Unknown') }})</a>
+                <a href="{{ _config_url }}" target="_blank" rel="noopener">{{ session.get('team_config').get('team_number') }} · {{ session.get('team_config').get('team_name', 'Unknown') }}</a>
                 {% else %}
-                {{ session.get('team_config').get('team_number') }} ({{ session.get('team_config').get('team_name', 'Unknown') }})
+                {{ session.get('team_config').get('team_number') }} · {{ session.get('team_config').get('team_name', 'Unknown') }}
                 {% endif %}
-            </p>
+            </div>
             {% else %}
-            <p class="config-status config-status-default">Using default configuration</p>
+            <div class="config-pill config-pill-default">Using default configuration</div>
+            {% endif %}
+
+            <a href="/history" class="nav-btn primary-link">Job History</a>
+            <a href="/docs/" class="nav-btn" title="Help & Documentation" target="_blank" rel="noopener">Docs</a>
+
+            {% if session.get('user_name') %}
+            <div class="user-info">
+                <div class="user-details">
+                    <span class="user-icon">▸</span>
+                    <span class="user-name">{{ session.get('user_name') }}</span>
+                </div>
+                <a href="/auth/logout" class="logout-btn">Logout</a>
+            </div>
             {% endif %}
         </div>
-
-        <!-- Help button (always visible) -->
-        {% if not session.get('user_name') %}
-        <div class="user-info">
-            <a href="/docs/" class="icon-btn" title="Help & Documentation" target="_blank">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-                    <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                </svg>
-            </a>
-        </div>
-        {% endif %}
-
-        <a href="/history" class="logout-btn" style="background: var(--primary); color: #fff; border-color: var(--primary); margin-right: 10px;">Job History</a>
-
-        <!-- User info (only shown when authenticated) -->
-        {% if session.get('user_name') %}
-        <div class="user-info">
-            <div class="user-details">
-                <span class="user-icon">▸</span>
-                <span class="user-name">{{ session.get('user_name') }}</span>
-                <a href="/docs/" class="icon-btn" title="Help & Documentation" target="_blank">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="12" cy="12" r="10"></circle>
-                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                    </svg>
-                </a>
-            </div>
-            <a href="/auth/logout" class="logout-btn">Logout</a>
-        </div>
-        {% endif %}
     </header>
 
     <main>
+        <section class="hero">
+            <div>
+                <div class="eyebrow">FRC Team 4909 · CNC workflow</div>
+                <h1>Generate <span>clean</span><br>G-code fast.</h1>
+                <p>Upload DXF geometry, tune machining parameters, orient the setup, preview the toolpath, then download or save the finished NC program.</p>
+            </div>
+            <div class="hero-actions">
+                <a href="/onshape/auth" id="onshapeConnectBtn" class="mini-btn primary-link">Import from Onshape</a>
+                <a href="/history" class="mini-btn">View History</a>
+            </div>
+        </section>
+
         <div class="workflow">
             <!-- Left Panel: Input & Parameters -->
-            <div>
+            <div class="stack">
                 <!-- Step 1: File Upload -->
                 <div class="panel">
                     <div class="panel-header">
                         <div class="step-number">1</div>
                         <div class="panel-title">Upload DXF File(s)</div>
+                        <div class="panel-subtitle">Input</div>
                     </div>
-
-                    <!-- Onshape Connect Button 
-                    <div style="margin-bottom: 1rem;">
-                        <a href="/onshape/auth" id="onshapeConnectBtn" class="btn btn-primary" style="display: flex; align-items: center; justify-content: center; gap: 0.5rem; text-decoration: none; width: 100%; box-sizing: border-box;">
-                            <span>🔗</span> Import from Onshape
-                        </a>
-                        <div style="text-align: center; margin: 0.75rem 0; color: var(--text-muted, #888); font-size: 0.85rem;">— or upload manually —</div>
-                    </div> -->
 
                     <!-- Big drop zone (shown when no file loaded) -->
                     <div class="drop-zone" id="dropZone">
@@ -132,7 +933,7 @@
 
                     <!-- File loaded card (shown when file is loaded) -->
                     <div id="fileLoadedCard" style="display: none;">
-                        <div class="file-info">
+                        <div class="file-info" id="fileInfo">
                             <div class="file-info-icon"></div>
                             <div class="file-info-details">
                                 <div class="file-info-name" id="fileName"></div>
@@ -150,150 +951,154 @@
                 </div>
 
                 <!-- Step 2: Parameters -->
-                <div class="panel" style="margin-top: 1.5rem;">
+                <div class="panel">
                     <div class="panel-header">
                         <div class="step-number">2</div>
                         <div class="panel-title">Set Parameters</div>
+                        <div class="panel-subtitle">Material + tool</div>
                     </div>
 
                     <form id="paramForm">
-                        {% if machines|length > 1 %}
-                        <div class="param-group">
-                            <label>
-                                Machine
-                                <span class="label-hint">Select which machine to use</span>
-                            </label>
-                            <select id="machineId" required>
-                                {% for machine_id, machine_info in machines.items() %}
-                                <option value="{{ machine_id }}"
-                                        {% if machine_id == current_machine_id %}selected{% endif %}>
-                                    {{ machine_info.name }}
-                                </option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        {% endif %}
-
-                        <div class="param-group">
-                            <label>
-                                Material Type
-                                <span class="label-hint">Cutting parameters preset</span>
-                            </label>
-                            <select id="material" required>
-                                {% for material_id, material_info in materials.items() %}
-                                <option value="{{ material_id }}"
-                                        {% if material_id == 'plywood' %}selected{% endif %}
-                                        {% if material_id in incomplete_materials %}data-incomplete="true"{% endif %}>
-                                    {{ material_info.name }}
-                                </option>
-                                {% endfor %}
-                            </select>
-                            <div id="materialWarning" class="warning-message" style="display: none;">
-                                ⚠️ This material has incomplete settings in your config. Using plywood defaults for missing parameters.
-                            </div>
-                        </div>
-
-                        <div class="param-group">
-                            <label>
-                                Material Thickness (inches)
-                                <span class="label-hint">{% if detected_thickness %}Auto-detected from CAD{% else %}1/4" = 0.25{% endif %}</span>
-                            </label>
-                            <input type="number" id="thickness" step="0.001" value="{% if detected_thickness %}{{ '%.3f' | format(detected_thickness) }}{% else %}0.25{% endif %}" min="0.01" required autocomplete="off" {% if detected_thickness %}readonly style="background-color: var(--surface-light); cursor: not-allowed; opacity: 0.7;"{% endif %}>
-                            {% if detected_thickness %}
-                            <div class="info-message" style="margin-top: 0.5rem; padding: 0.75rem; background: rgba(59, 130, 246, 0.1); border-left: 3px solid #3b82f6; font-size: 0.875rem; line-height: 1.4;">
-                                ℹ️ This thickness was auto-detected from your CAD part. Your stock material must match this thickness for accurate machining.
+                        <div class="param-grid">
+                            {% if machines|length > 1 %}
+                            <div class="param-group span-2">
+                                <label>
+                                    Machine
+                                    <span class="label-hint">Select which machine to use</span>
+                                </label>
+                                <select id="machineId" required>
+                                    {% for machine_id, machine_info in machines.items() %}
+                                    <option value="{{ machine_id }}"
+                                            {% if machine_id == current_machine_id %}selected{% endif %}>
+                                        {{ machine_info.name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
                             </div>
                             {% endif %}
-                        </div>
 
-                        <div class="param-group" id="quantityGroup">
-                            <label>
-                                Quantity
-                                <span class="label-hint">How many copies to cut from one sheet</span>
-                            </label>
-                            <input type="number" id="quantity" value="1" min="1" max="50" step="1" required>
-                        </div>
+                            <div class="param-group span-2">
+                                <label>
+                                    Material Type
+                                    <span class="label-hint">Cutting parameters preset</span>
+                                </label>
+                                <select id="material" required>
+                                    {% for material_id, material_info in materials.items() %}
+                                    <option value="{{ material_id }}"
+                                            {% if material_id == 'plywood' %}selected{% endif %}
+                                            {% if material_id in incomplete_materials %}data-incomplete="true"{% endif %}>
+                                        {{ material_info.name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <div id="materialWarning" class="warning-message" style="display: none;">
+                                    This material has incomplete settings in your config. Using plywood defaults for missing parameters.
+                                </div>
+                            </div>
 
-                        <div class="param-group" id="nestRotationGroup">
-                            <label>
-                                Nesting Rotation
-                                <span class="label-hint">Rotate copies to fit more on the sheet</span>
-                            </label>
-                            <select id="nestRotation">
-                                <option value="auto">Auto (best fit)</option>
-                                <option value="0">0° — no rotation</option>
-                                <option value="90">90° — rotate all copies</option>
-                            </select>
-                        </div>
+                            <div class="param-group">
+                                <label>
+                                    Material Thickness
+                                    <span class="label-hint">{% if detected_thickness %}Auto-detected from CAD{% else %}1/4&quot; = 0.25{% endif %}</span>
+                                </label>
+                                <input type="number" id="thickness" step="0.001" value="{% if detected_thickness %}{{ '%.3f' | format(detected_thickness) }}{% else %}0.25{% endif %}" min="0.01" required autocomplete="off" {% if detected_thickness %}readonly style="cursor: not-allowed; opacity: 0.7;"{% endif %}>
+                                {% if detected_thickness %}
+                                <div class="info-message" style="margin-top: 0.5rem; padding: 0.75rem; border-left: 3px solid #5ba3f5; font-size: 0.875rem; line-height: 1.4;">
+                                    This thickness was auto-detected from your CAD part. Your stock material must match this thickness for accurate machining.
+                                </div>
+                                {% endif %}
+                            </div>
 
-                        <div class="param-group" style="display: none;">
-                            <label>
-                                Tab Spacing (inches)
-                                <span class="label-hint">Distance between tabs (min 3 tabs)</span>
-                            </label>
-                            <input type="number" id="tabSpacing" step="0.5" value="6.0" min="0.5" max="24" required>
+                            <div class="param-group" id="quantityGroup">
+                                <label>
+                                    Quantity
+                                    <span class="label-hint">Copies per sheet</span>
+                                </label>
+                                <input type="number" id="quantity" value="1" min="1" max="50" step="1" required>
+                            </div>
+
+                            <div class="param-group" id="nestRotationGroup">
+                                <label>
+                                    Nesting Rotation
+                                    <span class="label-hint">Fit more parts</span>
+                                </label>
+                                <select id="nestRotation">
+                                    <option value="auto">Auto (best fit)</option>
+                                    <option value="0">0° — no rotation</option>
+                                    <option value="90">90° — rotate all copies</option>
+                                </select>
+                            </div>
+
+                            <div class="param-group">
+                                <label>
+                                    Tool Diameter
+                                    <span class="label-hint">4mm = 0.157&quot;</span>
+                                </label>
+                                <input type="number" id="toolDiameter" step="0.001" value="{{ default_tool_diameter }}" min="0.01" required>
+                            </div>
+
+                            <div class="param-group" style="display: none;">
+                                <label>
+                                    Tab Spacing
+                                    <span class="label-hint">Distance between tabs</span>
+                                </label>
+                                <input type="number" id="tabSpacing" step="0.5" value="6.0" min="0.5" max="24" required>
+                            </div>
                         </div>
 
                         <!-- Tube-specific parameters (shown only for aluminum tube) -->
                         <div id="tubeParams" style="display: none;">
-                            <div class="param-group">
-                                <label>
-                                    Tube Z-Height (inches)
-                                    <span class="label-hint">Height of tube in machine</span>
-                                </label>
-                                <input type="number" id="tubeHeight" step="0.001" value="2.0" min="0.1">
-                            </div>
+                            <div class="section-rule"></div>
+                            <div class="param-grid">
+                                <div class="param-group span-2">
+                                    <label>
+                                        Tube Z-Height
+                                        <span class="label-hint">Height of tube in machine</span>
+                                    </label>
+                                    <input type="number" id="tubeHeight" step="0.001" value="2.0" min="0.1">
+                                </div>
 
-                            <div class="param-group">
-                                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <input type="checkbox" id="squareEnd" checked>
-                                    <span>Square the zero end</span>
-                                </label>
-                            </div>
+                                <div class="check-card">
+                                    <label>
+                                        <input type="checkbox" id="squareEnd" checked>
+                                        <span>Square the zero end</span>
+                                    </label>
+                                </div>
 
-                            <div class="param-group">
-                                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <input type="checkbox" id="cutToLength" checked>
-                                    <span>Machine far end to length</span>
-                                </label>
+                                <div class="check-card">
+                                    <label>
+                                        <input type="checkbox" id="cutToLength" checked>
+                                        <span>Machine far end to length</span>
+                                    </label>
+                                </div>
                             </div>
                         </div>
 
-                        <!-- Divider between material and tool parameters -->
-                        <div style="border-bottom: 1px solid rgba(255, 255, 255, 0.1); margin: 1.5rem 0;"></div>
+                        <div class="section-rule"></div>
 
-                        <div class="param-group">
+                        <div class="check-card">
                             <label>
-                                Tool Diameter (inches)
-                                <span class="label-hint">4mm = 0.157"</span>
+                                <input type="checkbox" id="use25d">
+                                <span>
+                                    Enable 2.5D mode
+                                    <span class="label-hint">Use layered DXF depth processing when depth layers are present.</span>
+                                </span>
                             </label>
-                            <input type="number" id="toolDiameter" step="0.001" value="{{ default_tool_diameter }}" min="0.01" required>
-
-                        <div style="border-bottom: 1px solid rgba(255, 255, 255, 0.1); margin: 1.5rem 0;"></div>
-                            
-                            <div class="param-group">
-                                <label style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <input type="checkbox" id="use25d">
-                                    <span>Enable 2.5D mode</span>
-                                </label>
-                                <div class="label-hint">
-                                    Use layered DXF depth processing when depth layers are present.
-                                </div>
-                            </div>
                         </div>
                     </form>
                 </div>
 
                 <!-- Step 3: Generate -->
-                <div class="panel" style="margin-top: 1.5rem;">
+                <div class="panel action-card">
                     <div class="panel-header">
                         <div class="step-number">3</div>
                         <div class="panel-title">Generate Program</div>
+                        <div class="panel-subtitle">Output</div>
                     </div>
 
-                    <button id="generateBtn" disabled>
-                        Upload a file to continue
-                    </button>
+                    <div class="generate-row">
+                        <button id="generateBtn" disabled>Upload a file to continue</button>
+                    </div>
 
                     <div class="loading" id="loading">
                         <div class="spinner"></div>
@@ -301,15 +1106,15 @@
                     </div>
 
                     <div class="alert info" id="configInfoAlert" style="display: none;">
-                        <div class="alert-title">ℹ️ Using Default Configuration</div>
-                        <div>No team-specific PenguinCAM-config.yaml found. Using default settings (24"x24" machine). To customize for your CNC, add a PenguinCAM-config.yaml file to your Onshape documents.</div>
+                        <div class="alert-title">Using Default Configuration</div>
+                        <div>No team-specific PenguinCAM-config.yaml found. Using default settings (24&quot;x24&quot; machine). To customize for your CNC, add a PenguinCAM-config.yaml file to your Onshape documents.</div>
                     </div>
 
                     <div class="alert error" id="errorAlert">
                         <div class="alert-title">Error</div>
                         <div id="errorMessage"></div>
                         <div id="debugDxfLinkError" style="margin-top: 0.75rem; display: none;">
-                            <a href="/debug/download-dxf" style="color: var(--primary); text-decoration: underline;">
+                            <a href="/debug/download-dxf" style="color: var(--accent); text-decoration: underline;">
                                 Download debug DXF for manual testing
                             </a>
                         </div>
@@ -317,7 +1122,7 @@
 
                     <div class="results" id="results">
                         <div class="results-header">
-                            <div class="results-title">✓ Program Generated Successfully</div>
+                            <div class="results-title">Program Generated Successfully</div>
                         </div>
                         <div class="stats" id="stats"></div>
                         <details style="margin-top: 1rem;">
@@ -357,7 +1162,7 @@
                     <!-- DXF Setup View (2D) -->
                     <div id="dxf-setup-container" style="display: none;">
                         <div class="setup-info">
-                            <div class="setup-label">Rotate to orient your part • Origin is always bottom-left (X→ Y↑)</div>
+                            <div class="setup-label">Rotate to orient your part · Origin is always bottom-left (X→ Y↑)</div>
                         </div>
                         <canvas id="dxfSetupCanvas"></canvas>
 
@@ -410,18 +1215,14 @@
 
                     <div class="controls" id="previewControls" style="display: none;">
                         <div class="controls-label">
-                            Origin (0,0,0) = Lower-left corner, sacrifice board • Semi-transparent box = stock material • Use mouse to rotate • Scroll to zoom
+                            Origin (0,0,0) = Lower-left corner, sacrifice board · Semi-transparent box = stock material · Use mouse to rotate · Scroll to zoom
                         </div>
                         <button class="icon-button" id="resetView">Reset View</button>
                     </div>
 
-                    <div class="button-group" id="gcodeButtons" style="margin-top: 1rem; display: none; gap: 1rem;">
-                        <button id="downloadBtn" class="secondary" disabled>
-                            Download Program
-                        </button>
-                        <button id="driveBtn" class="primary" disabled style="display: none;">
-                            ↑ Save to Google Drive
-                        </button>
+                    <div class="button-group" id="gcodeButtons" style="margin-top: 1rem; display: none; gap: 1rem; grid-template-columns: 1fr 1fr;">
+                        <button id="downloadBtn" class="secondary" disabled>Download Program</button>
+                        <button id="driveBtn" class="primary" disabled style="display: none;">Save to Google Drive</button>
                     </div>
 
                     <div id="driveStatus" style="margin-top: 0.5rem; font-size: 0.9rem; display: none;"></div>
@@ -429,6 +1230,10 @@
             </div>
         </div>
     </main>
+
+    <footer>
+        BionicsCAM · FRC Team 4909 Billerica Bionics · Built on PenguinCAM by Team 6238
+    </footer>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
