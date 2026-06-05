@@ -27,6 +27,10 @@
         .crumbs a, .crumbs span { border: 1px solid var(--line); border-radius: 999px; padding: .45rem .7rem; color: var(--ink-soft); text-decoration: none; font-size: .82rem; }
         .crumbs span { color: var(--ink); border-color: rgba(249, 182, 69, .35); }
         .picker-alert { border: 1px solid rgba(255, 102, 102, .28); background: rgba(255, 102, 102, .08); border-radius: 18px; padding: .9rem 1rem; color: var(--ink); margin: 1rem 0; }
+        .debug-panel { margin-top: 1rem; border: 1px solid rgba(249, 182, 69, .24); border-radius: 18px; background: rgba(249, 182, 69, .055); overflow: hidden; }
+        .debug-panel summary { cursor: pointer; padding: .85rem 1rem; font-family: 'DM Mono', monospace; font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--gold); }
+        .debug-body { padding: 0 1rem 1rem; color: var(--ink-soft); font-size: .84rem; }
+        .debug-body pre { white-space: pre-wrap; word-break: break-word; border: 1px solid var(--line); border-radius: 14px; padding: .75rem; background: rgba(0,0,0,.22); color: var(--ink); max-height: 320px; overflow: auto; }
         .open-link { color: var(--ink-soft); text-decoration: none; }
         .open-link:hover { color: var(--gold); }
         @media (max-width: 860px) { .picker-hero { grid-template-columns: 1fr; } .picker-search { flex-direction: column; } .pick-row { grid-template-columns: 1fr; } }
@@ -67,6 +71,15 @@
 
         {% if error_message %}
         <div class="picker-alert">{{ error_message }}</div>
+        {% if document_debug %}
+        <details class="debug-panel">
+            <summary>Show Onshape document-list diagnostics</summary>
+            <div class="debug-body">
+                <p>These are safe request labels, status codes, and response previews from the picker. No OAuth tokens are shown.</p>
+                <pre>{{ document_debug | tojson(indent=2) }}</pre>
+            </div>
+        </details>
+        {% endif %}
         {% endif %}
 
         {% if step == 'document' %}
