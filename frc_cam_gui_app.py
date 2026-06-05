@@ -1876,6 +1876,10 @@ def onshape_import():
                 if last_error:
                     debug['last_onshape_api_error'] = last_error
 
+                selection_debug = getattr(client, 'last_selection_resolution_debug', None)
+                if selection_debug:
+                    debug['selection_resolution'] = selection_debug
+
                 return jsonify({
                     'error': 'No parts could be exported from this document',
                     'message': empty_message,
