@@ -56,6 +56,7 @@ class OnshapeClient:
         self.token_expires = None
         self._auth_mode_logged = False
         self.last_onshape_api_error = None
+        self.last_selection_resolution_debug = None
     
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
@@ -328,6 +329,42 @@ class OnshapeClient:
             'content_type': response.headers.get('Content-Type') if hasattr(response, 'headers') else None,
             'response_preview': preview,
         }
+
+    def _collect_string_tokens(self, value, max_tokens=200):
+        """Collect useful string identifiers from nested Onshape JSON.
+
+        Onshape panel selections sometimes provide short topology/query IDs
+        (for example JjG) that are not stored in bodydetails as face['id'].
+        They may appear under other nested keys. Collecting all string tokens
+        lets selected-face resolution match the ID flavor Onshape actually sent.
+        """
+        tokens = []
+
+        def visit(obj):
+            if len(tokens) >= max_tokens:
+                return
+            if isinstance(obj, str):
+                text = obj.strip()
+                if text and text not in tokens:
+                    tokens.append(text)
+                # Selection paths sometimes contain tokens separated by symbols.
+                for part in re.split(r'[^A-Za-z0-9_\-]+', text):
+                    part = part.strip()
+                    if part and part not in tokens:
+                        tokens.append(part)
+                return
+            if isinstance(obj, dict):
+                for key, val in obj.items():
+                    if isinstance(key, str) and key.strip() and key not in tokens:
+                        tokens.append(key.strip())
+                    visit(val)
+                return
+            if isinstance(obj, (list, tuple, set)):
+                for item in obj:
+                    visit(item)
+
+        visit(value)
+        return tokens[:max_tokens]
 
     def get_user_info(self):
         """Get information about the authenticated user"""
@@ -950,7 +987,8 @@ class OnshapeClient:
                         'area': face.get('area', 0),
                         'surfaceType': surface.get('type', 'UNKNOWN'),
                         'origin': origin,
-                        'normal': normal
+                        'normal': normal,
+                        'tokens': self._collect_string_tokens(face),
                     }
                     face_info.append(info)
 
@@ -959,7 +997,8 @@ class OnshapeClient:
 
             result[bid] = {
                 'name': body_name,
-                'faces': face_info
+                'faces': face_info,
+                'tokens': self._collect_string_tokens(body),
             }
             log(f"Body {bid} ({body_name}): {len(face_info)} faces, largest area: {face_info[0]['area'] if face_info else 0}")
         
@@ -2178,23 +2217,70 @@ class OnshapeClient:
             return []
 
         # Resolve selected face IDs to their parent body. Keep first face per body.
+        # Do not rely only on face['id']; Onshape's panel can send a short
+        # selection/query token (for example JjG) that appears elsewhere in the
+        # bodydetails JSON. Match against every collected string token for the
+        # face and body before giving up.
         selected_by_body = {}
+        available_debug = []
+        matched_selected_ids = set()
+
         for bid, body_data in bodies_with_faces.items():
+            body_tokens = set(body_data.get('tokens') or [])
+            body_debug = {
+                'body_id': bid,
+                'name': body_data.get('name', 'Part'),
+                'body_token_samples': list(body_tokens)[:20],
+                'face_samples': [],
+            }
+
             for face in body_data.get('faces', []):
                 fid = face.get('id')
-                if fid in selected_face_set and bid not in selected_by_body:
+                face_tokens = set(face.get('tokens') or [])
+                if fid:
+                    face_tokens.add(fid)
+
+                combined_tokens = face_tokens | body_tokens | {bid}
+                matched_ids = selected_face_set.intersection(combined_tokens)
+
+                body_debug['face_samples'].append({
+                    'id': fid,
+                    'area': face.get('area', 0),
+                    'surfaceType': face.get('surfaceType'),
+                    'token_samples': list(face_tokens)[:20],
+                })
+
+                if matched_ids and bid not in selected_by_body:
+                    matched_selected_ids.update(matched_ids)
                     selected_by_body[bid] = {
                         'body_id': bid,
                         'part_name': body_data.get('name', 'Part'),
-                        'face_id': fid,
+                        # Prefer the real bodydetails face id for 2.5D reference;
+                        # fall back to the selected token if Onshape omitted it.
+                        'face_id': fid or next(iter(matched_ids)),
+                        'selected_ids': sorted(matched_ids),
                         'normal': face.get('normal') or {'x': 0, 'y': 0, 'z': 1},
                         'origin': face.get('origin') or {'x': 0, 'y': 0, 'z': 0},
                     }
-                    log(f"✅ Selected face {fid} resolved to body {bid} ({body_data.get('name', 'Part')})")
+                    log(
+                        f"✅ Selected token(s) {sorted(matched_ids)} resolved "
+                        f"to body {bid} ({body_data.get('name', 'Part')}) via face {fid}"
+                    )
 
-        missing = [fid for fid in selected_face_ids if not any(v['face_id'] == fid for v in selected_by_body.values())]
+            body_debug['face_samples'] = body_debug['face_samples'][:8]
+            available_debug.append(body_debug)
+
+        missing = [fid for fid in selected_face_ids if fid not in matched_selected_ids]
         if missing:
-            log(f"⚠️  Could not resolve selected face IDs: {missing}")
+            log(f"⚠️  Could not resolve selected face IDs/tokens: {missing}")
+
+        self.last_selection_resolution_debug = {
+            'selected_face_ids': selected_face_ids,
+            'matched_selected_ids': sorted(matched_selected_ids),
+            'missing_selected_ids': missing,
+            'available_body_count': len(bodies_with_faces),
+            'available_body_samples': available_debug[:8],
+        }
 
         if not selected_by_body:
             log("❌ None of the selected faces resolved to solid bodies")
