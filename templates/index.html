@@ -82,6 +82,8 @@
         </div>
         {% endif %}
 
+        <a href="/history" class="logout-btn" style="background: var(--primary); color: #fff; border-color: var(--primary); margin-right: 10px;">Job History</a>
+
         <!-- User info (only shown when authenticated) -->
         {% if session.get('user_name') %}
         <div class="user-info">
@@ -96,7 +98,6 @@
                     </svg>
                 </a>
             </div>
-            <a href="/history" class="logout-btn" style="background: var(--primary); color: #fff; border-color: var(--primary);">Job History</a>
             <a href="/auth/logout" class="logout-btn">Logout</a>
         </div>
         {% endif %}
@@ -113,6 +114,13 @@
                         <div class="panel-title">Upload DXF File(s)</div>
                     </div>
 
+                    <!-- Onshape Connect Button -->
+                    <div style="margin-bottom: 1rem;">
+                        <a href="/onshape/auth" id="onshapeConnectBtn" class="btn btn-primary" style="display: flex; align-items: center; justify-content: center; gap: 0.5rem; text-decoration: none; width: 100%; box-sizing: border-box;">
+                            <span>🔗</span> Import from Onshape
+                        </a>
+                        <div style="text-align: center; margin: 0.75rem 0; color: var(--text-muted, #888); font-size: 0.85rem;">— or upload manually —</div>
+                    </div>
 
                     <!-- Big drop zone (shown when no file loaded) -->
                     <div class="drop-zone" id="dropZone">
@@ -260,9 +268,19 @@
                                 <span class="label-hint">4mm = 0.157"</span>
                             </label>
                             <input type="number" id="toolDiameter" step="0.001" value="{{ default_tool_diameter }}" min="0.01" required>
-                        </div>
 
-                        <input type="checkbox" id="use25d" style="display:none;">
+                        <div style="border-bottom: 1px solid rgba(255, 255, 255, 0.1); margin: 1.5rem 0;"></div>
+                            
+                            <div class="param-group">
+                                <label style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <input type="checkbox" id="use25d">
+                                    <span>Enable 2.5D mode</span>
+                                </label>
+                                <div class="label-hint">
+                                    Use layered DXF depth processing when depth layers are present.
+                                </div>
+                            </div>
+                        </div>
                     </form>
                 </div>
 
