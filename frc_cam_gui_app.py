@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+x`#!/usr/bin/env python3
 """
 BionicsCam - FRC Team 4909 CAM Tool
 A Flask-based web interface for generating G-code from DXF files
@@ -554,6 +554,24 @@ def generate_onshape_filename(doc_name, part_name):
     # Last resort: timestamp (server's local time)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return f"Onshape_Part_{timestamp}"
+
+
+def is_safe_internal_path(path):
+    """Allow only same-site relative redirects."""
+    return bool(path and path.startswith('/') and not path.startswith('//') and '://' not in path)
+
+
+def render_onshape_picker(**context):
+    """Render the standalone Onshape import picker."""
+    context.setdefault('query', '')
+    context.setdefault('documents', [])
+    context.setdefault('part_studios', [])
+    context.setdefault('parts', [])
+    context.setdefault('selected_document', None)
+    context.setdefault('selected_part_studio', None)
+    context.setdefault('error_message', None)
+    context.setdefault('onshape_connected', session.get('onshape_authenticated', False))
+    return render_template('onshape_picker.html', **context)
 
 # ============================================================================
 # Routes
@@ -1336,6 +1354,125 @@ def history_download(job_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/onshape/launch')
+def onshape_launch():
+    """
+    Start the browser-based Onshape import flow.
+    This is separate from the existing Onshape extension callback flow.
+    """
+    if not ONSHAPE_AVAILABLE:
+        return jsonify({'error': 'Onshape integration not available'}), 400
+
+    client = session_manager.get_client(get_current_user_id())
+    if client:
+        return redirect('/onshape/picker')
+
+    session['post_onshape_auth_redirect'] = '/onshape/picker'
+    return redirect('/onshape/auth?next=/onshape/picker')
+
+
+@app.route('/onshape/picker')
+@limiter.limit("20 per minute")
+def onshape_picker():
+    """
+    Three-step Onshape picker:
+      1. Choose a document.
+      2. Choose a Part Studio from that document.
+      3. Choose exactly one part/body, then hand off to /onshape/import.
+
+    Existing extension import behavior is unchanged.
+    """
+    if not ONSHAPE_AVAILABLE:
+        return jsonify({'error': 'Onshape integration not available'}), 400
+
+    client = session_manager.get_client(get_current_user_id())
+    if not client:
+        session['post_onshape_auth_redirect'] = '/onshape/picker'
+        return redirect('/onshape/auth?next=/onshape/picker')
+
+    query = request.args.get('q', '').strip()
+    document_id = request.args.get('documentId') or request.args.get('did')
+    workspace_id = request.args.get('workspaceId') or request.args.get('wid')
+    element_id = request.args.get('elementId') or request.args.get('eid')
+
+    try:
+        # Step 1: document list/search
+        if not document_id:
+            documents = client.list_documents(query=query, limit=30)
+            session_manager.update_session_tokens(client)
+            return render_onshape_picker(
+                step='document',
+                query=query,
+                documents=documents,
+                error_message=None if documents else 'No Onshape documents were returned. Try searching by name or check account access.'
+            )
+
+        doc_info = client.get_document_info(document_id) or {}
+        selected_document = {
+            'id': document_id,
+            'name': doc_info.get('name') or 'Selected document',
+            'workspace_id': workspace_id or (doc_info.get('defaultWorkspace') or {}).get('id'),
+            'href': f'https://cad.onshape.com/documents/{document_id}'
+        }
+        workspace_id = workspace_id or selected_document['workspace_id']
+        if not workspace_id:
+            return render_onshape_picker(
+                step='studio',
+                selected_document=selected_document,
+                error_message='Could not find a workspace for this document.'
+            ), 400
+
+        # Step 2: Part Studio list
+        if not element_id:
+            part_studios = client.list_part_studio_elements(document_id, workspace_id)
+            session_manager.update_session_tokens(client)
+            if len(part_studios) == 1:
+                only = part_studios[0]
+                return redirect(
+                    f"/onshape/picker?documentId={document_id}&workspaceId={workspace_id}&elementId={only['id']}"
+                )
+
+            return render_onshape_picker(
+                step='studio',
+                selected_document=selected_document,
+                part_studios=part_studios,
+                error_message=None if part_studios else 'This document has no Part Studio tabs in the selected workspace.'
+            )
+
+        # Step 3: part/body list. Choose one first; multiple can be added later.
+        element_info = client.get_element_info(document_id, workspace_id, element_id) or {}
+        selected_part_studio = {
+            'id': element_id,
+            'name': element_info.get('name') or 'Selected Part Studio',
+            'href': f'https://cad.onshape.com/documents/{document_id}/w/{workspace_id}/e/{element_id}'
+        }
+        parts = client.list_parts_for_import(document_id, workspace_id, element_id)
+        session_manager.update_session_tokens(client)
+
+        if len(parts) == 1:
+            body_id = parts[0]['body_id']
+            return redirect(
+                f"/onshape/import?documentId={document_id}&workspaceId={workspace_id}&elementId={element_id}&bodyId={body_id}&multilayer=true"
+            )
+
+        return render_onshape_picker(
+            step='part',
+            selected_document=selected_document,
+            selected_part_studio=selected_part_studio,
+            parts=parts,
+            error_message=None if parts else 'No solid parts/bodies were found in this Part Studio.'
+        )
+
+    except Exception as e:
+        log(f"Onshape picker failed: {e}")
+        log(traceback.format_exc())
+        return render_onshape_picker(
+            step='document',
+            query=query,
+            error_message=f'Onshape picker failed: {str(e)}'
+        ), 500
+
 @app.route('/onshape/auth')
 def onshape_auth():
     """Start Onshape OAuth flow"""
@@ -1352,6 +1489,10 @@ def onshape_auth():
 
         # Store state in session for verification
         session['onshape_oauth_state'] = state
+
+        next_path = request.args.get('next')
+        if is_safe_internal_path(next_path):
+            session['post_onshape_auth_redirect'] = next_path
 
         # Get authorization URL
         auth_url = client.get_authorization_url(state=state)
@@ -1453,6 +1594,10 @@ def onshape_oauth_callback():
             # Redirect back to import with original parameters
             params = urlencode({k: v for k, v in pending_import.items() if v})
             return redirect(f'/onshape/import?{params}')
+
+        post_auth_redirect = session.pop('post_onshape_auth_redirect', None)
+        if is_safe_internal_path(post_auth_redirect):
+            return redirect(post_auth_redirect)
 
         # Otherwise redirect to main page with success message
         return redirect('/?onshape_connected=true')
@@ -1634,47 +1779,6 @@ def debug_onshape_faces():
             'traceback': traceback.format_exc()
         }), 500
 
-
-@app.route('/api/build-info')
-def api_build_info():
-    """Tiny deployment sanity endpoint for debugging Vercel goblins."""
-    try:
-        import subprocess
-        commit = os.environ.get('VERCEL_GIT_COMMIT_SHA')
-        if not commit:
-            try:
-                commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], stderr=subprocess.DEVNULL).decode().strip()
-            except Exception:
-                commit = 'unknown'
-        return jsonify({
-            'ok': True,
-            'app': 'BionicsCAM',
-            'commit': commit,
-            'vercel_env': os.environ.get('VERCEL_ENV', 'local'),
-            'has_onshape_access_key': bool(os.environ.get('ONSHAPE_ACCESS_KEY')),
-            'has_onshape_secret_key': bool(os.environ.get('ONSHAPE_SECRET_KEY')),
-            'onshape_backend_auth_mode': 'api_key' if ((os.environ.get('ONSHAPE_BACKEND_AUTH_MODE') or os.environ.get('ONSHAPE_AUTH_MODE') or '').strip().lower().replace('-', '_') in ('api_key', 'apikey') and os.environ.get('ONSHAPE_ACCESS_KEY') and os.environ.get('ONSHAPE_SECRET_KEY')) else 'oauth',
-            'refresh_config_during_import': os.environ.get('ONSHAPE_REFRESH_CONFIG_DURING_IMPORT', ''),
-        })
-    except Exception as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 500
-
-@app.route('/api/onshape-auth-mode')
-def api_onshape_auth_mode():
-    """Show auth mode without exposing secrets."""
-    has_access = bool(os.environ.get('ONSHAPE_ACCESS_KEY'))
-    has_secret = bool(os.environ.get('ONSHAPE_SECRET_KEY'))
-    requested_mode = (os.environ.get('ONSHAPE_BACKEND_AUTH_MODE') or os.environ.get('ONSHAPE_AUTH_MODE') or '').strip().lower().replace('-', '_')
-    api_key_enabled = requested_mode in ('api_key', 'apikey') and has_access and has_secret
-    return jsonify({
-        'has_onshape_access_key': has_access,
-        'has_onshape_secret_key': has_secret,
-        'api_key_auth_enabled': api_key_enabled,
-        'oauth_only_mode': not api_key_enabled,
-        'requested_auth_mode': requested_mode or 'oauth',
-        'onshape_backend_auth_mode': 'api_key' if api_key_enabled else 'oauth',
-    })
-
 @app.route('/onshape/import', methods=['GET', 'POST'])
 @limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
 def onshape_import():
@@ -1767,14 +1871,6 @@ def onshape_import():
         user_id = get_current_user_id()
         client = session_manager.get_client(user_id)
 
-        if client:
-            try:
-                mode = client.get_auth_mode() if hasattr(client, 'get_auth_mode') else ('api_key' if client.has_api_key_auth() else 'oauth')
-                log(f"ONSHAPE_BACKEND_AUTH_MODE={mode}")
-                log(f"ONSHAPE_API_KEY_ENV access={bool(os.environ.get('ONSHAPE_ACCESS_KEY'))} secret={bool(os.environ.get('ONSHAPE_SECRET_KEY'))}")
-            except Exception as auth_log_error:
-                log(f"Could not log Onshape auth mode: {auth_log_error}")
-
         if not client:
             # Store import parameters in session before redirecting to OAuth
             session['pending_onshape_import'] = {
@@ -1787,53 +1883,41 @@ def onshape_import():
             # Redirect to Onshape OAuth
             return redirect('/onshape/auth')
 
-        # Avoid burning Onshape API calls during import. Config discovery makes
-        # extra companies/documents/search calls before the actual part export,
-        # which is painful when we are debugging Onshape limits. Default to using
-        # the cached/default team config during imports; set
-        # ONSHAPE_REFRESH_CONFIG_DURING_IMPORT=1 to restore the old behavior.
-        refresh_config = os.environ.get('ONSHAPE_REFRESH_CONFIG_DURING_IMPORT', '').lower() in ('1', 'true', 'yes')
-        if refresh_config:
-            log("\n" + "="*60)
-            log("🔄 Refreshing team config from Onshape...")
-            config_yaml = client.fetch_config_file(document_id=document_id)
-            if config_yaml:
-                log(f"🔍 DEBUG: Raw YAML length: {len(config_yaml)} bytes")
-                log(f"🔍 DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
-                team_config = TeamConfig.from_yaml(config_yaml)
-                log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
-                log(f"🔍 DEBUG: team_config._data keys: {list(team_config._data.keys())}")
-                log(f"🔍 DEBUG: team_config._data has 'team' key? {'team' in team_config._data}")
-                if 'team' in team_config._data:
-                    log(f"🔍 DEBUG: team_config._data['team'] = {team_config._data['team']}")
-                session['team_config_data'] = team_config._data
-                session['team_config'] = team_config.to_dict()
-                session['team_number'] = team_config.team_number
-                session['team_config_url'] = getattr(client, 'last_config_url', None)
-                session['using_default_config'] = False
-            else:
-                log("⚠️  No team config found - using defaults")
-                team_config = TeamConfig()
-                session['team_config_data'] = {}
-                session['team_config'] = team_config.to_dict()
-                session['team_number'] = team_config.team_number
-                session.pop('team_config_url', None)
-                session['using_default_config'] = True
-            log("="*60 + "\n")
-
-            # Get document's owning company/classroom only when doing full config refresh.
-            doc_company = client.get_document_company(document_id)
-            if doc_company:
-                team_name = doc_company.get('name')
-                log(f"📚 Document company: {team_name}")
-                session['team_name'] = team_name
+        # Reload team config on every export (allows users to update config without re-authenticating)
+        log("\n" + "="*60)
+        log("🔄 Refreshing team config from Onshape...")
+        config_yaml = client.fetch_config_file(document_id=document_id)
+        if config_yaml:
+            log(f"🔍 DEBUG: Raw YAML length: {len(config_yaml)} bytes")
+            log(f"🔍 DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
+            team_config = TeamConfig.from_yaml(config_yaml)
+            log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
+            log(f"🔍 DEBUG: team_config._data keys: {list(team_config._data.keys())}")
+            log(f"🔍 DEBUG: team_config._data has 'team' key? {'team' in team_config._data}")
+            if 'team' in team_config._data:
+                log(f"🔍 DEBUG: team_config._data['team'] = {team_config._data['team']}")
+            session['team_config_data'] = team_config._data
+            session['team_config'] = team_config.to_dict()
+            session['team_number'] = team_config.team_number
+            session['team_config_url'] = getattr(client, 'last_config_url', None)
+            session['using_default_config'] = False
         else:
-            log("⚡ Skipping Onshape config/company discovery during import")
-            log("   Set ONSHAPE_REFRESH_CONFIG_DURING_IMPORT=1 to re-enable it")
-            team_config = TeamConfig(session.get('team_config_data', {}))
-            session.setdefault('team_config', team_config.to_dict())
-            session.setdefault('team_number', team_config.team_number)
-            session.setdefault('using_default_config', True)
+            log("⚠️  No team config found - using defaults")
+            team_config = TeamConfig()
+            session['team_config_data'] = {}
+            session['team_config'] = team_config.to_dict()
+            session['team_number'] = team_config.team_number
+            session.pop('team_config_url', None)
+            session['using_default_config'] = True
+        log("="*60 + "\n")
+
+        # Get document's owning company/classroom (Onshape Education context)
+        # This requires a document, so we fetch it here rather than during OAuth
+        doc_company = client.get_document_company(document_id)
+        if doc_company:
+            team_name = doc_company.get('name')
+            log(f"📚 Document company: {team_name}")
+            session['team_name'] = team_name
 
         # ── MULTI-PART IMPORT – early exit before face auto-selection ──────
         # ?multi=true → export every body as its own DXF; skip single-part flow.
@@ -1871,20 +1955,9 @@ def onshape_import():
                         'debug': api_limit_error,
                     }), 429
 
-                debug = {
-                    'onshape_backend_auth_mode': client.get_auth_mode() if hasattr(client, 'get_auth_mode') else ('api_key' if client.has_api_key_auth() else 'oauth'),
-                    'multi_parts': multi_parts,
-                    'multilayer': multilayer_for_multi,
-                    'selected_face_count': len(selected_face_ids),
-                }
-                last_error = getattr(client, 'last_onshape_api_error', None)
-                if last_error:
-                    debug['last_onshape_api_error'] = last_error
-
                 return jsonify({
                     'error': 'No parts could be exported from this document',
-                    'message': empty_message,
-                    'debug': debug,
+                    'message': empty_message
                 }), 500
 
             dxf_files_inline = []
