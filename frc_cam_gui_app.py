@@ -1738,41 +1738,53 @@ def onshape_import():
             # Redirect to Onshape OAuth
             return redirect('/onshape/auth')
 
-        # Reload team config on every export (allows users to update config without re-authenticating)
-        log("\n" + "="*60)
-        log("🔄 Refreshing team config from Onshape...")
-        config_yaml = client.fetch_config_file(document_id=document_id)
-        if config_yaml:
-            log(f"🔍 DEBUG: Raw YAML length: {len(config_yaml)} bytes")
-            log(f"🔍 DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
-            team_config = TeamConfig.from_yaml(config_yaml)
-            log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
-            log(f"🔍 DEBUG: team_config._data keys: {list(team_config._data.keys())}")
-            log(f"🔍 DEBUG: team_config._data has 'team' key? {'team' in team_config._data}")
-            if 'team' in team_config._data:
-                log(f"🔍 DEBUG: team_config._data['team'] = {team_config._data['team']}")
-            session['team_config_data'] = team_config._data
-            session['team_config'] = team_config.to_dict()
-            session['team_number'] = team_config.team_number
-            session['team_config_url'] = getattr(client, 'last_config_url', None)
-            session['using_default_config'] = False
-        else:
-            log("⚠️  No team config found - using defaults")
-            team_config = TeamConfig()
-            session['team_config_data'] = {}
-            session['team_config'] = team_config.to_dict()
-            session['team_number'] = team_config.team_number
-            session.pop('team_config_url', None)
-            session['using_default_config'] = True
-        log("="*60 + "\n")
+        # Avoid burning Onshape API calls during import. Config discovery makes
+        # extra companies/documents/search calls before the actual part export,
+        # which is painful when we are debugging Onshape limits. Default to using
+        # the cached/default team config during imports; set
+        # ONSHAPE_REFRESH_CONFIG_DURING_IMPORT=1 to restore the old behavior.
+        refresh_config = os.environ.get('ONSHAPE_REFRESH_CONFIG_DURING_IMPORT', '').lower() in ('1', 'true', 'yes')
+        if refresh_config:
+            log("\n" + "="*60)
+            log("🔄 Refreshing team config from Onshape...")
+            config_yaml = client.fetch_config_file(document_id=document_id)
+            if config_yaml:
+                log(f"🔍 DEBUG: Raw YAML length: {len(config_yaml)} bytes")
+                log(f"🔍 DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
+                team_config = TeamConfig.from_yaml(config_yaml)
+                log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
+                log(f"🔍 DEBUG: team_config._data keys: {list(team_config._data.keys())}")
+                log(f"🔍 DEBUG: team_config._data has 'team' key? {'team' in team_config._data}")
+                if 'team' in team_config._data:
+                    log(f"🔍 DEBUG: team_config._data['team'] = {team_config._data['team']}")
+                session['team_config_data'] = team_config._data
+                session['team_config'] = team_config.to_dict()
+                session['team_number'] = team_config.team_number
+                session['team_config_url'] = getattr(client, 'last_config_url', None)
+                session['using_default_config'] = False
+            else:
+                log("⚠️  No team config found - using defaults")
+                team_config = TeamConfig()
+                session['team_config_data'] = {}
+                session['team_config'] = team_config.to_dict()
+                session['team_number'] = team_config.team_number
+                session.pop('team_config_url', None)
+                session['using_default_config'] = True
+            log("="*60 + "\n")
 
-        # Get document's owning company/classroom (Onshape Education context)
-        # This requires a document, so we fetch it here rather than during OAuth
-        doc_company = client.get_document_company(document_id)
-        if doc_company:
-            team_name = doc_company.get('name')
-            log(f"📚 Document company: {team_name}")
-            session['team_name'] = team_name
+            # Get document's owning company/classroom only when doing full config refresh.
+            doc_company = client.get_document_company(document_id)
+            if doc_company:
+                team_name = doc_company.get('name')
+                log(f"📚 Document company: {team_name}")
+                session['team_name'] = team_name
+        else:
+            log("⚡ Skipping Onshape config/company discovery during import")
+            log("   Set ONSHAPE_REFRESH_CONFIG_DURING_IMPORT=1 to re-enable it")
+            team_config = TeamConfig(session.get('team_config_data', {}))
+            session.setdefault('team_config', team_config.to_dict())
+            session.setdefault('team_number', team_config.team_number)
+            session.setdefault('using_default_config', True)
 
         # ── MULTI-PART IMPORT – early exit before face auto-selection ──────
         # ?multi=true → export every body as its own DXF; skip single-part flow.
