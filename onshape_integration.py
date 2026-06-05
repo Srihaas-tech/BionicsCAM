@@ -6,16 +6,15 @@ Handles OAuth authentication and DXF export from Onshape
 import logging
 import math
 import os
+import hashlib
+import hmac
 import re
 import sys
 import json
 import tempfile
 import time
 import traceback
-import hmac
-import hashlib
-import secrets
-import string
+import uuid
 from email.utils import formatdate
 
 import ezdxf
@@ -23,7 +22,7 @@ import requests
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from urllib.parse import urlencode, parse_qs, urlparse
+from urllib.parse import urlencode, parse_qs, urlsplit
 
 from flask import session
 from shapely.geometry import Point, Polygon, LineString
@@ -55,6 +54,7 @@ class OnshapeClient:
         self.access_token = None
         self.refresh_token = None
         self.token_expires = None
+        self._auth_mode_logged = False
     
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
@@ -69,20 +69,6 @@ class OnshapeClient:
         # Override with environment variables (these take precedence)
         config['client_id'] = os.environ.get('ONSHAPE_CLIENT_ID', config.get('client_id', 'VKDKRMPYLAC3PE6YNHRWFGRTW37ZFWTG2IDE5UI='))
         config['client_secret'] = os.environ.get('ONSHAPE_CLIENT_SECRET', config.get('client_secret'))
-
-        # Optional API-key auth. If present, backend API calls use these keys
-        # instead of OAuth Bearer tokens. This makes BionicsCAM consume the
-        # normal Onshape API-key request bucket shown on the Developer page.
-        config['access_key'] = (
-            os.environ.get('ONSHAPE_ACCESS_KEY')
-            or os.environ.get('ONSHAPE_API_ACCESS_KEY')
-            or config.get('access_key')
-        )
-        config['secret_key'] = (
-            os.environ.get('ONSHAPE_SECRET_KEY')
-            or os.environ.get('ONSHAPE_API_SECRET_KEY')
-            or config.get('secret_key')
-        )
         
         # Set defaults for other fields if not present
         if 'redirect_uri' not in config:
@@ -216,15 +202,66 @@ class OnshapeClient:
             log(f"Error refreshing token: {e}")
             return False
     
-    def _has_api_key_auth(self):
-        """Return True when Onshape API-key credentials are configured."""
-        return bool(self.config.get('access_key') and self.config.get('secret_key'))
+    def has_api_key_auth(self):
+        """Return True when backend Onshape API-key credentials are configured."""
+        return bool(os.environ.get('ONSHAPE_ACCESS_KEY') and os.environ.get('ONSHAPE_SECRET_KEY'))
+
+    def _log_auth_mode_once(self):
+        """Log auth mode without exposing secrets."""
+        if self._auth_mode_logged:
+            return
+        mode = 'api_key' if self.has_api_key_auth() else 'oauth'
+        log(f"🔐 Onshape auth mode: {mode}")
+        self._auth_mode_logged = True
+
+    def _make_api_key_headers(self, method, url, headers=None, has_json_body=False):
+        """Create Onshape API-key HMAC headers.
+
+        This intentionally logs only the auth mode. It never logs the access key,
+        secret key, nonce, or signature.
+        """
+        access_key = os.environ.get('ONSHAPE_ACCESS_KEY')
+        secret_key = os.environ.get('ONSHAPE_SECRET_KEY')
+        if not access_key or not secret_key:
+            raise ValueError('Onshape API-key auth requested but key env vars are missing')
+
+        signed_headers = dict(headers or {})
+        parsed = urlsplit(url)
+        path = parsed.path
+        query = parsed.query
+        nonce = str(uuid.uuid4())
+        date = formatdate(usegmt=True)
+        content_type = signed_headers.get('Content-Type') or ('application/json' if has_json_body else '')
+
+        if content_type:
+            signed_headers['Content-Type'] = content_type
+
+        string_to_sign = '\n'.join([
+            method.lower(),
+            nonce.lower(),
+            date.lower(),
+            content_type.lower(),
+            path.lower(),
+            query.lower(),
+            '',
+        ])
+        digest = hmac.new(
+            secret_key.encode('utf-8'),
+            string_to_sign.encode('utf-8'),
+            hashlib.sha256,
+        ).digest()
+        signature = base64.b64encode(digest).decode('utf-8')
+
+        signed_headers.update({
+            'Date': date,
+            'On-Nonce': nonce,
+            'Authorization': f'On {access_key}:HmacSHA256:{signature}',
+            'Accept': 'application/json',
+        })
+        return signed_headers
 
     def _ensure_valid_token(self):
-        """Ensure we have a valid access token, unless API-key auth is configured."""
-        if self._has_api_key_auth():
-            return
-
+        """Ensure we have a valid access token"""
         if not self.access_token:
             raise ValueError("No access token. User must authenticate first.")
         
@@ -232,71 +269,37 @@ class OnshapeClient:
         if self.token_expires and datetime.now() >= self.token_expires - timedelta(minutes=5):
             if not self.refresh_access_token():
                 raise ValueError("Token expired and refresh failed")
-
-    def _make_api_key_headers(self, method, full_url, content_type):
-        """Build Onshape API-key HMAC headers for one request URL."""
-        access_key = self.config.get('access_key')
-        secret_key = self.config.get('secret_key')
-        nonce = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(25))
-        date_header = formatdate(timeval=None, localtime=False, usegmt=True)
-        parsed = urlparse(full_url)
-        path = parsed.path or ''
-        query = parsed.query or ''
-        signing_string = (
-            f"{method.upper()}\n"
-            f"{nonce}\n"
-            f"{date_header}\n"
-            f"{content_type}\n"
-            f"{path}\n"
-            f"{query}\n"
-        ).lower()
-        digest = hmac.new(
-            secret_key.encode('utf-8'),
-            signing_string.encode('utf-8'),
-            hashlib.sha256
-        ).digest()
-        signature = base64.b64encode(digest).decode('utf-8')
-        return {
-            'Date': date_header,
-            'On-Nonce': nonce,
-            'Authorization': f'On {access_key}:HmacSHA256:{signature}',
-        }
     
     def _make_api_request(self, method, endpoint, **kwargs):
         """
         Make an authenticated API request to Onshape.
 
-        If ONSHAPE_ACCESS_KEY/ONSHAPE_SECRET_KEY are configured, use
-        Onshape API-key HMAC auth. Otherwise, fall back to OAuth Bearer auth.
-        
-        Args:
-            method: HTTP method (GET, POST, etc.)
-            endpoint: API endpoint (e.g., '/documents/d/...')
-            **kwargs: Additional arguments for requests
-            
-        Returns:
-            Response object
+        Backend API calls prefer API-key auth when ONSHAPE_ACCESS_KEY and
+        ONSHAPE_SECRET_KEY exist. OAuth remains as a fallback for local/dev use.
         """
-        method = method.upper()
-        url = f"{self.API_BASE}{endpoint}"
-        headers = dict(kwargs.pop('headers', {}) or {})
+        self._log_auth_mode_once()
 
-        if self._has_api_key_auth():
-            # The HMAC signature must include the final query string, so prepare
-            # params into the URL before signing and then remove params from
-            # kwargs to avoid appending them twice.
-            params = kwargs.pop('params', None)
-            prepared = requests.Request(method, url, params=params).prepare()
-            signed_url = prepared.url or url
-            content_type = headers.get('Content-Type') or 'application/json'
-            headers.setdefault('Content-Type', content_type)
-            headers.setdefault('Accept', 'application/json;charset=UTF-8; qs=0.09')
-            headers.update(self._make_api_key_headers(method, signed_url, content_type))
-            return requests.request(method, signed_url, headers=headers, **kwargs)
+        url = f"{self.API_BASE}{endpoint}"
+        headers = kwargs.pop('headers', {}) or {}
+        params = kwargs.get('params')
+        request_kwargs = dict(kwargs)
+
+        if self.has_api_key_auth():
+            # Prepare the exact URL requests will send, including query params,
+            # so the HMAC signature matches the final request path/query.
+            req = requests.Request(method, url, params=params)
+            prepared = req.prepare()
+            signed_headers = self._make_api_key_headers(
+                method,
+                prepared.url,
+                headers=headers,
+                has_json_body=('json' in kwargs and kwargs.get('json') is not None),
+            )
+            return requests.request(method, url, headers=signed_headers, **request_kwargs)
 
         self._ensure_valid_token()
         headers['Authorization'] = f'Bearer {self.access_token}'
-        return requests.request(method, url, headers=headers, **kwargs)
+        return requests.request(method, url, headers=headers, **request_kwargs)
     
     def get_user_info(self):
         """Get information about the authenticated user"""
