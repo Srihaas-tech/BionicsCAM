@@ -1634,6 +1634,42 @@ def debug_onshape_faces():
             'traceback': traceback.format_exc()
         }), 500
 
+
+@app.route('/api/build-info')
+def api_build_info():
+    """Tiny deployment sanity endpoint for debugging Vercel goblins."""
+    try:
+        import subprocess
+        commit = os.environ.get('VERCEL_GIT_COMMIT_SHA')
+        if not commit:
+            try:
+                commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], stderr=subprocess.DEVNULL).decode().strip()
+            except Exception:
+                commit = 'unknown'
+        return jsonify({
+            'ok': True,
+            'app': 'BionicsCAM',
+            'commit': commit,
+            'vercel_env': os.environ.get('VERCEL_ENV', 'local'),
+            'has_onshape_access_key': bool(os.environ.get('ONSHAPE_ACCESS_KEY')),
+            'has_onshape_secret_key': bool(os.environ.get('ONSHAPE_SECRET_KEY')),
+            'onshape_backend_auth_mode': 'api_key' if (os.environ.get('ONSHAPE_ACCESS_KEY') and os.environ.get('ONSHAPE_SECRET_KEY')) else 'oauth',
+            'refresh_config_during_import': os.environ.get('ONSHAPE_REFRESH_CONFIG_DURING_IMPORT', ''),
+        })
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+@app.route('/api/onshape-auth-mode')
+def api_onshape_auth_mode():
+    """Show auth mode without exposing secrets."""
+    has_access = bool(os.environ.get('ONSHAPE_ACCESS_KEY'))
+    has_secret = bool(os.environ.get('ONSHAPE_SECRET_KEY'))
+    return jsonify({
+        'has_onshape_access_key': has_access,
+        'has_onshape_secret_key': has_secret,
+        'onshape_backend_auth_mode': 'api_key' if (has_access and has_secret) else 'oauth',
+    })
+
 @app.route('/onshape/import', methods=['GET', 'POST'])
 @limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
 def onshape_import():
@@ -1725,6 +1761,14 @@ def onshape_import():
         # Get Onshape client for this user
         user_id = get_current_user_id()
         client = session_manager.get_client(user_id)
+
+        if client:
+            try:
+                mode = 'api_key' if client.has_api_key_auth() else 'oauth'
+                log(f"ONSHAPE_BACKEND_AUTH_MODE={mode}")
+                log(f"ONSHAPE_API_KEY_ENV access={bool(os.environ.get('ONSHAPE_ACCESS_KEY'))} secret={bool(os.environ.get('ONSHAPE_SECRET_KEY'))}")
+            except Exception as auth_log_error:
+                log(f"Could not log Onshape auth mode: {auth_log_error}")
 
         if not client:
             # Store import parameters in session before redirecting to OAuth
