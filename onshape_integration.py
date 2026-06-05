@@ -203,167 +203,49 @@ class OnshapeClient:
             log(f"Error refreshing token: {e}")
             return False
     
-    def has_api_key_auth(self):
-        """Return True when backend Onshape API-key credentials are configured."""
+    def api_key_credentials_configured(self):
+        """Return True when API-key credentials exist in the environment."""
         return bool(os.environ.get('ONSHAPE_ACCESS_KEY') and os.environ.get('ONSHAPE_SECRET_KEY'))
 
+    def api_key_auth_enabled(self):
+        """Return True only when API-key auth is explicitly requested.
+
+        Quick-fix policy: OAuth is the default so each Onshape user can access
+        their own documents. API-key auth can still be enabled later by setting
+        ONSHAPE_BACKEND_AUTH_MODE=api_key or ONSHAPE_AUTH_MODE=api_key.
+        """
+        mode = (
+            os.environ.get('ONSHAPE_BACKEND_AUTH_MODE')
+            or os.environ.get('ONSHAPE_AUTH_MODE')
+            or ''
+        ).strip().lower().replace('-', '_')
+        return mode in ('api_key', 'apikey')
+
+    def has_api_key_auth(self):
+        """Return True when API-key auth should actively be used."""
+        return self.api_key_credentials_configured() and self.api_key_auth_enabled()
+
     def get_auth_mode(self):
-        """Return the backend Onshape auth mode without exposing secrets."""
+        """Return the active backend auth mode without exposing secrets."""
         return 'api_key' if self.has_api_key_auth() else 'oauth'
 
     def _log_auth_mode_once(self):
         """Log auth mode without exposing secrets."""
         if self._auth_mode_logged:
             return
-        log(f"🔐 Onshape auth mode: {self.get_auth_mode()}")
+        mode = self.get_auth_mode()
+        log(f"🔐 Onshape auth mode: {mode}")
+        if self.api_key_credentials_configured() and not self.api_key_auth_enabled():
+            log("🔐 Onshape API keys are configured but ignored because OAuth-only mode is active")
+            log("   Set ONSHAPE_BACKEND_AUTH_MODE=api_key to re-enable API-key backend calls")
         self._auth_mode_logged = True
 
-    def _record_onshape_api_error(self, method, endpoint, response):
-        """Store the last Onshape API error in a browser-safe shape."""
-        try:
-            preview = response.text[:1200]
-        except Exception:
-            preview = ''
-        self.last_onshape_api_error = {
-            'auth_mode': self.get_auth_mode(),
-            'method': method,
-            'endpoint': endpoint,
-            'status_code': getattr(response, 'status_code', None),
-            'content_type': getattr(response, 'headers', {}).get('content-type', ''),
-            'response_preview': preview,
-        }
+    def _make_api_key_headers(self, method, url, headers=None, has_json_body=False):
+        """Create Onshape API-key HMAC headers.
 
-    def _looks_like_dxf(self, content):
-        """Return True when bytes/text look like DXF, not a JSON/html error."""
-        if not content:
-            return False
-        if isinstance(content, bytes):
-            preview = content[:256].decode('utf-8', errors='ignore').lstrip()
-        else:
-            preview = str(content)[:256].lstrip()
-        upper = preview.upper()
-        return upper.startswith('0\nSECTION') or 'SECTION' in upper[:80]
-
-    def _cache_enabled(self):
-        """Return True when local Onshape DXF export caching is enabled."""
-        value = os.environ.get('ONSHAPE_DXF_CACHE_ENABLED', '1').strip().lower()
-        return value not in ('0', 'false', 'no', 'off')
-
-    def _get_dxf_cache_dir(self):
-        """Return/create the local DXF cache directory.
-
-        Vercel only guarantees writable storage under /tmp. On a Raspberry Pi
-        this can be overridden with ONSHAPE_DXF_CACHE_DIR for persistence.
+        This intentionally logs only the auth mode. It never logs the access key,
+        secret key, nonce, or signature.
         """
-        cache_dir = os.environ.get('ONSHAPE_DXF_CACHE_DIR') or '/tmp/bionicscam_onshape_dxf_cache'
-        try:
-            os.makedirs(cache_dir, exist_ok=True)
-            return cache_dir
-        except Exception as e:
-            log(f"⚠️  Could not create Onshape DXF cache dir {cache_dir}: {e}")
-            return None
-
-    def _dxf_cache_key(self, namespace, **parts):
-        """Create a stable cache key without exposing secrets."""
-        payload = {
-            'namespace': namespace,
-            'cache_version': 'v2',
-            'cache_buster': os.environ.get('ONSHAPE_DXF_CACHE_BUSTER', ''),
-            **parts,
-        }
-        raw = json.dumps(payload, sort_keys=True, default=str).encode('utf-8')
-        return hashlib.sha256(raw).hexdigest()
-
-    def _cache_paths(self, cache_key):
-        cache_dir = self._get_dxf_cache_dir()
-        if not cache_dir:
-            return None, None
-        return (
-            os.path.join(cache_dir, f'{cache_key}.dxf'),
-            os.path.join(cache_dir, f'{cache_key}.json'),
-        )
-
-    def _read_cached_dxf_export(self, cache_key):
-        """Read a cached DXF export plus metadata, if valid."""
-        if not self._cache_enabled():
-            return None
-        dxf_path, meta_path = self._cache_paths(cache_key)
-        if not dxf_path or not os.path.exists(dxf_path):
-            return None
-        try:
-            with open(dxf_path, 'rb') as f:
-                content = f.read()
-            if not self._looks_like_dxf(content):
-                log(f"⚠️  Ignoring invalid cached DXF: {dxf_path}")
-                return None
-            metadata = {}
-            if meta_path and os.path.exists(meta_path):
-                with open(meta_path, 'r', encoding='utf-8') as f:
-                    metadata = json.load(f)
-            log(f"♻️  Onshape DXF cache hit: {cache_key[:12]}")
-            return {'content': content, 'metadata': metadata}
-        except Exception as e:
-            log(f"⚠️  Failed to read Onshape DXF cache {cache_key[:12]}: {e}")
-            return None
-
-    def _write_cached_dxf_export(self, cache_key, content, metadata=None):
-        """Write a DXF export to cache. Failures are non-fatal."""
-        if not self._cache_enabled() or not self._looks_like_dxf(content):
-            return
-        dxf_path, meta_path = self._cache_paths(cache_key)
-        if not dxf_path:
-            return
-        try:
-            tmp_path = f'{dxf_path}.tmp'
-            with open(tmp_path, 'wb') as f:
-                f.write(content if isinstance(content, bytes) else str(content).encode('utf-8'))
-            os.replace(tmp_path, dxf_path)
-            if meta_path:
-                meta = dict(metadata or {})
-                meta['cached_at'] = datetime.utcnow().isoformat() + 'Z'
-                tmp_meta = f'{meta_path}.tmp'
-                with open(tmp_meta, 'w', encoding='utf-8') as f:
-                    json.dump(meta, f, indent=2, sort_keys=True)
-                os.replace(tmp_meta, meta_path)
-            log(f"💾 Onshape DXF cached: {cache_key[:12]}")
-        except Exception as e:
-            log(f"⚠️  Failed to write Onshape DXF cache {cache_key[:12]}: {e}")
-
-    def _selected_face_cache_key(self, document_id, workspace_id, element_id, selected_face_id, multilayer=False):
-        return self._dxf_cache_key(
-            'selected-face-export',
-            document_id=document_id,
-            workspace_id=workspace_id,
-            element_id=element_id,
-            selected_face_id=selected_face_id,
-            multilayer=bool(multilayer),
-        )
-
-    def _body_export_cache_key(self, document_id, workspace_id, element_id, body_id, face_id, multilayer=False):
-        return self._dxf_cache_key(
-            'body-export',
-            document_id=document_id,
-            workspace_id=workspace_id,
-            element_id=element_id,
-            body_id=body_id,
-            face_id=face_id,
-            multilayer=bool(multilayer),
-        )
-
-    def _cache_result_from_entry(self, cache_entry, fallback_filename='cached_onshape_part.dxf'):
-        metadata = cache_entry.get('metadata') or {}
-        filename = metadata.get('filename') or fallback_filename
-        return {
-            'content': cache_entry['content'],
-            'filename': filename,
-            'body_id': metadata.get('body_id', 'cached'),
-            'part_name': metadata.get('part_name', 'Cached Onshape Part'),
-            'source_face_id': metadata.get('source_face_id'),
-            'from_cache': True,
-        }
-
-    def _make_api_key_headers(self, method, url, headers=None):
-        """Create Onshape API-key HMAC headers without logging secrets."""
         access_key = os.environ.get('ONSHAPE_ACCESS_KEY')
         secret_key = os.environ.get('ONSHAPE_SECRET_KEY')
         if not access_key or not secret_key:
@@ -371,8 +253,13 @@ class OnshapeClient:
 
         signed_headers = dict(headers or {})
         parsed = urlsplit(url)
+        path = parsed.path
+        query = parsed.query
         nonce = str(uuid.uuid4())
         date = formatdate(usegmt=True)
+        # Onshape's published API-key samples sign GET requests with
+        # Content-Type: application/json too. Leaving it blank can make the
+        # HMAC string differ from what Onshape expects.
         content_type = signed_headers.get('Content-Type') or 'application/json'
         signed_headers['Content-Type'] = content_type
 
@@ -381,8 +268,8 @@ class OnshapeClient:
             nonce.lower(),
             date.lower(),
             content_type.lower(),
-            parsed.path.lower(),
-            parsed.query.lower(),
+            path.lower(),
+            query.lower(),
             '',
         ])
         digest = hmac.new(
@@ -419,7 +306,6 @@ class OnshapeClient:
         ONSHAPE_SECRET_KEY exist. OAuth remains as a fallback for local/dev use.
         """
         self._log_auth_mode_once()
-        self.last_onshape_api_error = None
 
         url = f"{self.API_BASE}{endpoint}"
         headers = kwargs.pop('headers', {}) or {}
@@ -427,19 +313,47 @@ class OnshapeClient:
         request_kwargs = dict(kwargs)
 
         if self.has_api_key_auth():
+            # Prepare the exact URL requests will send, including query params,
+            # so the HMAC signature matches the final request path/query.
             req = requests.Request(method, url, params=params)
             prepared = req.prepare()
-            signed_headers = self._make_api_key_headers(method, prepared.url, headers=headers)
+            signed_headers = self._make_api_key_headers(
+                method,
+                prepared.url,
+                headers=headers,
+                has_json_body=('json' in kwargs and kwargs.get('json') is not None),
+            )
             response = requests.request(method, url, headers=signed_headers, **request_kwargs)
-        else:
-            self._ensure_valid_token()
-            headers['Authorization'] = f'Bearer {self.access_token}'
-            response = requests.request(method, url, headers=headers, **request_kwargs)
+            self._record_onshape_response(method, endpoint, response)
+            return response
 
-        if getattr(response, 'status_code', 200) >= 400:
-            self._record_onshape_api_error(method, endpoint, response)
+        self._ensure_valid_token()
+        headers['Authorization'] = f'Bearer {self.access_token}'
+        response = requests.request(method, url, headers=headers, **request_kwargs)
+        self._record_onshape_response(method, endpoint, response)
         return response
     
+    def _record_onshape_response(self, method, endpoint, response):
+        """Store the last failing Onshape API response for safe UI diagnostics."""
+        if 200 <= getattr(response, 'status_code', 0) < 300:
+            self.last_onshape_api_error = None
+            return
+
+        preview = ''
+        try:
+            preview = response.text[:800]
+        except Exception:
+            preview = '<response text unavailable>'
+
+        self.last_onshape_api_error = {
+            'auth_mode': self.get_auth_mode(),
+            'method': method,
+            'endpoint': endpoint,
+            'status_code': getattr(response, 'status_code', None),
+            'content_type': response.headers.get('Content-Type') if hasattr(response, 'headers') else None,
+            'response_preview': preview,
+        }
+
     def get_user_info(self):
         """Get information about the authenticated user"""
         try:
@@ -617,122 +531,137 @@ class OnshapeClient:
 
     def export_face_to_dxf(self, document_id, workspace_id, element_id, face_id, body_id=None, face_normal=None):
         """
-        Export one selected planar face/body as DXF.
+        Export a face from a Part Studio as DXF
 
-        Important: for face-selected imports, the Onshape web-client
-        exportinternal endpoint is the one that can project a selected planar
-        face to DXF. The public Part Studio translations API exports visible
-        parts, not topology face IDs, so it is only a fallback here.
+        Args:
+            document_id: Onshape document ID (from URL: /documents/d/{did})
+            workspace_id: Workspace ID (from URL: /w/{wid})
+            element_id: Element ID (from URL: /e/{eid})
+            face_id: The face ID (used for logging/backwards compatibility)
+            body_id: The body/part ID to export (if None, uses face_id for backwards compatibility)
+            face_normal: Optional dict with face normal vector {'x': ..., 'y': ..., 'z': ...}
+
+        Returns:
+            DXF file content as bytes, or None if failed
         """
-        log(f"\n=== Attempting selected DXF export ===")
+        log(f"\n=== Attempting DXF export ===")
         log(f"Document: {document_id}")
         log(f"Workspace: {workspace_id}")
         log(f"Element: {element_id}")
-        log(f"Selected face: {face_id}")
-        log(f"Owning body/part: {body_id}")
+        log(f"Face: {face_id}")
+        log(f"Body: {body_id}")
         if face_normal:
             log(f"Normal: ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
-
-        normal_key = None
-        if face_normal:
-            normal_key = {
-                axis: round(float(face_normal.get(axis, 0) or 0), 6)
-                for axis in ('x', 'y', 'z')
-            }
-        face_export_cache_key = self._dxf_cache_key(
-            'flat-face-export',
-            document_id=document_id,
-            workspace_id=workspace_id,
-            element_id=element_id,
-            face_id=face_id,
-            body_id=body_id,
-            face_normal=normal_key,
+        
+        # Use Onshape's public translations endpoint first. The older
+        # /exportinternal call is an internal web-client endpoint and can return
+        # misleading 402 responses even when the normal Developer API counter is
+        # not exhausted.
+        log("\n[Method 1] Trying public Part Studio translations API with selected part/body ID...")
+        # The public translations API's partIds field expects visible part/body IDs,
+        # not topology face IDs like JPK/JjG. Passing a face ID produces
+        # "No visible parts to export". When we already resolved the selected
+        # face back to its owning body, export that body here.
+        selected_export_id = body_id or face_id
+        if body_id:
+            log(f"Using resolved body_id for public DXF translation: {selected_export_id}")
+        else:
+            log(f"No body_id supplied; falling back to selected face_id: {selected_export_id}")
+        selected_result = self.export_dxf_async(
+            document_id, workspace_id, element_id, part_ids=[selected_export_id]
         )
-        cached_export = self._read_cached_dxf_export(face_export_cache_key)
-        if cached_export:
-            return cached_export['content']
+        if selected_result:
+            return selected_result
 
-        # Method 1: selected-face export. This is the same family of endpoint
-        # Onshape uses for right-click/export flows and is the only reliable
-        # route we have found for topology face IDs like JjG / KnKF.
+        if os.environ.get('ONSHAPE_ENABLE_EXPORTINTERNAL', '').lower() not in ('1', 'true', 'yes'):
+            log("Public selected DXF translation failed; skipping internal export endpoint by default")
+            return None
+
+        # Try the internal export endpoint only when explicitly enabled for
+        # debugging. Normal app traffic should stay on public API routes.
+        log("\n[Method 2] Trying exportinternal endpoint (debug fallback)...")
         endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
+        
         try:
+            # For Part Studios, Onshape's "partIds" parameter actually expects face IDs, not body IDs
+            # (Confusing naming by Onshape!)
+            export_id = face_id  # Always use face_id for Part Studio exports
+            log(f"Using face_id for export: {export_id}")
+
+            # Calculate view matrix based on face normal (if provided)
             if face_normal:
                 view_matrix = self._calculate_view_matrix(face_normal)
+                log(f"Using calculated view matrix for normal ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
             else:
+                # Default to top-down view
                 view_matrix = "1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1"
+                log("Using default top-down view matrix")
 
             body = {
                 "format": "DXF",
                 "view": view_matrix,
                 "version": "2013",
                 "units": "inch",
-                "flatten": "true",
+                "flatten": "true",  # Critical for 2D export
                 "includeBendCenterlines": "true",
                 "includeSketches": "false",
                 "splinesAsPolylines": "true",
                 "triggerAutoDownload": "true",
                 "storeInDocument": "false",
-                # Despite the name, exportinternal accepts the selected face id
-                # for planar-face DXF projection. Passing body_id here can make
-                # Onshape export the wrong thing or nothing.
-                "partIds": str(face_id),
+                "partIds": export_id  # Must be a string, not an array!
             }
-            log("[Method 1] exportinternal selected-face DXF")
+            
             log(f"API endpoint: {self.API_BASE}{endpoint}")
             log(f"Request body: {json.dumps(body, indent=2)}")
+            
             response = self._make_api_request('POST', endpoint, json=body)
+            
             log(f"Response status: {response.status_code}")
-
-            if response.status_code == 200 and self._looks_like_dxf(response.content):
-                log(f"✅ Selected-face DXF export succeeded: {len(response.content)} bytes")
-                self._write_cached_dxf_export(
-                    face_export_cache_key,
-                    response.content,
-                    {
-                        'filename': f'{body_id or face_id}.dxf',
-                        'body_id': body_id,
-                        'part_name': body_id or face_id,
-                        'source_face_id': face_id,
-                        'export_method': 'exportinternal-selected-face',
-                    },
-                )
+            
+            if response.status_code == 200:
+                log(f"Success! DXF content length: {len(response.content)} bytes")
+                # Check if it's actually DXF content
+                content_preview = response.content[:100].decode('utf-8', errors='ignore')
                 return response.content
-
-            log(f"Selected-face export failed/invalid: {response.status_code}")
-            log(f"Response preview: {response.text[:500]}")
-            self._record_onshape_api_error('POST', endpoint, response)
+            else:
+                log(f"exportinternal failed: {response.status_code}")
+                log(f"Response: {response.text}")
+                
         except Exception as e:
-            log(f"Error with selected-face exportinternal: {e}")
+            log(f"Error with exportinternal: {e}")
             log(traceback.format_exc())
-
-        # Method 2: public translations fallback for selected body/part. This
-        # is useful when Onshape accepts the body id as a visible part id. It
-        # will not work with raw face IDs, so prefer body_id here.
-        if body_id:
-            log("\n[Method 2] public Part Studio translations API with resolved body id")
-            result = self.export_dxf_async(
-                document_id, workspace_id, element_id,
-                part_ids=[body_id],
-                timeout=45,
-            )
-            if result:
-                self._write_cached_dxf_export(
-                    face_export_cache_key,
-                    result,
-                    {
-                        'filename': f'{body_id}.dxf',
-                        'body_id': body_id,
-                        'part_name': body_id,
-                        'source_face_id': face_id,
-                        'export_method': 'translation-body-fallback',
-                    },
-                )
-                return result
-
-        log("\n=== Selected DXF export failed ===")
+        
+        # Fallback: Try async translations API
+        log("\n[Method 3] Trying full-element async translations API...")
+        result = self.export_dxf_async(document_id, workspace_id, element_id)
+        if result:
+            return result
+        
+        # Fallback: Try POST /export endpoint
+        log("\n[Method 4] Trying POST /export endpoint...")
+        endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/export"
+        
+        try:
+            body = {
+                "format": "DXF",
+                "version": "2013",
+                "flattenAssemblies": True
+            }
+            
+            response = self._make_api_request('POST', endpoint, json=body)
+            
+            if response.status_code == 200:
+                log(f"Success! DXF content length: {len(response.content)} bytes")
+                return response.content
+            else:
+                log(f"POST export failed: {response.status_code}")
+                
+        except Exception as e:
+            log(f"Error with POST export: {e}")
+        
+        log("\n=== All export methods failed ===")
         return None
-
+    
     def _export_element_to_dxf(self, document_id, workspace_id, element_id):
         """Try to export entire element as DXF"""
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/dxf"
@@ -756,10 +685,13 @@ class OnshapeClient:
     
     def start_dxf_translation(self, document_id, workspace_id, element_id, part_ids=None):
         """
-        Start an async DXF export translation.
+        Start an async DXF export translation using Onshape's public
+        Part Studio translations API.
 
         Args:
-            part_ids: Optional list/string of selected visible body/part IDs.
+            part_ids: Optional list/string of selected Onshape IDs. For planar
+                face exports, Onshape's DXF translator accepts the selected
+                face/part id through the partIds field.
 
         Returns:
             Translation ID if successful, None otherwise
@@ -772,7 +704,7 @@ class OnshapeClient:
 
             body = {
                 "formatName": "DXF",
-                "storeInDocument": False,
+                "storeInDocument": False,  # Don't store in Onshape, just export
                 "flattenAssemblies": True,
                 "version": "2013",
                 "units": "inch",
@@ -782,15 +714,18 @@ class OnshapeClient:
             if part_ids:
                 if isinstance(part_ids, (list, tuple, set)):
                     cleaned_ids = [str(pid).strip() for pid in part_ids if str(pid).strip()]
-                    part_ids_value = ','.join(cleaned_ids)
+                    part_ids_value = ",".join(cleaned_ids)
                 else:
                     part_ids_value = str(part_ids).strip()
+
                 if part_ids_value:
-                    body['partIds'] = part_ids_value
+                    body["partIds"] = part_ids_value
                     log(f"Selected DXF translation partIds: {part_ids_value}")
 
             log(f"Request body: {json.dumps(body, indent=2)}")
+
             response = self._make_api_request('POST', endpoint, json=body)
+
             log(f"Response status: {response.status_code}")
 
             if response.status_code == 200:
@@ -801,7 +736,6 @@ class OnshapeClient:
 
             log(f"Failed to start translation: {response.status_code}")
             log(f"Response: {response.text}")
-            self._record_onshape_api_error('POST', endpoint, response)
             return None
 
         except Exception as e:
@@ -864,15 +798,20 @@ class OnshapeClient:
     
     def export_dxf_async(self, document_id, workspace_id, element_id, timeout=60, part_ids=None):
         """
-        Export DXF using async translations API
-        Polls until complete or timeout
-        
+        Export DXF using Onshape's public async translations API.
+        Polls until complete or timeout.
+
+        Args:
+            part_ids: Optional selected face/part IDs to limit the export.
+
         Returns:
             DXF content as bytes, or None
         """
         
         # Start translation
-        translation_id = self.start_dxf_translation(document_id, workspace_id, element_id, part_ids=part_ids)
+        translation_id = self.start_dxf_translation(
+            document_id, workspace_id, element_id, part_ids=part_ids
+        )
         if not translation_id:
             return None
         
@@ -929,7 +868,12 @@ class OnshapeClient:
             log(f"Element ID: {element_id}")
             log(f"Full endpoint: {self.API_BASE}{endpoint}")
 
-            response = self._make_api_request('GET', endpoint)
+            # includeFaces=true is required to get face data (normals, areas, IDs).
+            # rollbackBarIndex=-1 queries end-of-feature-tree state, not an intermediate one.
+            response = self._make_api_request('GET', endpoint, params={
+                'includeFaces': 'true',
+                'rollbackBarIndex': '-1',
+            })
 
             log(f"\n📡 Response status: {response.status_code}")
 
@@ -1808,6 +1752,17 @@ class OnshapeClient:
         Returns:
             DXF file content as bytes, or None if failed
         """
+        log("Using public Part Studio translations API for selected face group")
+        public_result = self.export_dxf_async(
+            document_id, workspace_id, element_id, part_ids=face_ids_str
+        )
+        if public_result:
+            return public_result
+
+        if os.environ.get('ONSHAPE_ENABLE_EXPORTINTERNAL', '').lower() not in ('1', 'true', 'yes'):
+            log("Public face-group translation failed; skipping internal export endpoint by default")
+            return None
+
         endpoint = f"/documents/d/{document_id}/w/{workspace_id}/e/{element_id}/exportinternal"
 
         try:
@@ -2215,49 +2170,23 @@ class OnshapeClient:
         """
         Export only the bodies that correspond to selected face IDs.
 
-        The Onshape element panel can send short topology IDs such as JjG or
-        KnKF. Those IDs are sometimes stored directly as face['id'] and
-        sometimes appear deeper in the bodydetails JSON. Resolve by scanning
-        every string token in each face/body, then export the owning body once.
+        This is used by the Onshape panel when the user shift/ctrl-selects
+        multiple faces and clicks Import selected parts. We de-dupe by body ID
+        so selecting two faces on the same part exports that part only once.
+
+        Returns:
+            List of dicts: [{'content': bytes, 'filename': str, 'body_id': str}, ...]
         """
         log(f"\n{'='*70}")
         log(f"MULTI-PART EXPORT: selected faces -> individual DXFs ({'2.5D' if multilayer else '2D'})")
         log(f"Selected face IDs: {selected_face_ids}")
         log(f"{'='*70}")
 
-        self.selection_resolution_debug = None
-
         if not selected_face_ids:
             log("⚠️  No selected face IDs supplied")
             return []
 
         selected_face_ids = [str(fid).strip() for fid in selected_face_ids if str(fid).strip()]
-
-        cached_results = []
-        selected_face_ids_to_resolve = []
-        for selected_id in selected_face_ids:
-            cache_key = self._selected_face_cache_key(
-                document_id, workspace_id, element_id, selected_id, multilayer=multilayer
-            )
-            cached_export = self._read_cached_dxf_export(cache_key)
-            if cached_export:
-                cached_results.append(
-                    self._cache_result_from_entry(
-                        cached_export,
-                        fallback_filename=f'{selected_id}.dxf'
-                    )
-                )
-            else:
-                selected_face_ids_to_resolve.append(selected_id)
-
-        if cached_results and not selected_face_ids_to_resolve:
-            log(f"♻️  All {len(cached_results)} selected Onshape DXF(s) served from cache; skipping bodydetails/export calls")
-            return cached_results
-
-        if cached_results:
-            log(f"♻️  {len(cached_results)} selected Onshape DXF(s) served from cache; resolving {len(selected_face_ids_to_resolve)} uncached selection(s)")
-
-        selected_face_ids = selected_face_ids_to_resolve
         selected_face_set = set(selected_face_ids)
 
         faces_data = self.list_faces(document_id, workspace_id, element_id)
@@ -2273,79 +2202,22 @@ class OnshapeClient:
             log("❌ get_body_faces returned None – cannot resolve selected bodies")
             return []
 
-        def collect_tokens(value, out=None):
-            if out is None:
-                out = set()
-            if isinstance(value, dict):
-                for key, val in value.items():
-                    if isinstance(key, str) and key:
-                        out.add(key)
-                    collect_tokens(val, out)
-            elif isinstance(value, list):
-                for item in value:
-                    collect_tokens(item, out)
-            elif isinstance(value, str) and value:
-                out.add(value)
-            return out
-
+        # Resolve selected face IDs to their parent body. Keep first face per body.
         selected_by_body = {}
-        matched_selected_ids = set()
-        available_body_samples = []
-        available_face_samples = []
-
         for bid, body_data in bodies_with_faces.items():
-            body_tokens = collect_tokens(body_data)
-            body_sample = {
-                'body_id': bid,
-                'name': body_data.get('name', 'Part'),
-                'body_token_samples': sorted(list(body_tokens))[:20],
-                'face_samples': [],
-            }
-
             for face in body_data.get('faces', []):
-                face_tokens = collect_tokens(face)
                 fid = face.get('id')
-                if fid:
-                    face_tokens.add(str(fid))
-
-                face_sample = {
-                    'id': fid,
-                    'surfaceType': face.get('surface', {}).get('type'),
-                    'area': face.get('area') or face.get('faceProperties', {}).get('area'),
-                    'token_samples': sorted(list(face_tokens))[:20],
-                }
-                body_sample['face_samples'].append(face_sample)
-                if len(available_face_samples) < 20:
-                    available_face_samples.append(face_sample)
-
-                matches = selected_face_set.intersection(face_tokens)
-                if matches and bid not in selected_by_body:
-                    matched_id = sorted(matches)[0]
+                if fid in selected_face_set and bid not in selected_by_body:
                     selected_by_body[bid] = {
                         'body_id': bid,
                         'part_name': body_data.get('name', 'Part'),
-                        'face_id': fid or matched_id,
-                        'selected_id': matched_id,
-                        'normal': face.get('normal') or face.get('surface', {}).get('normal') or {'x': 0, 'y': 0, 'z': 1},
-                        'origin': face.get('origin') or face.get('surface', {}).get('origin') or {'x': 0, 'y': 0, 'z': 0},
+                        'face_id': fid,
+                        'normal': face.get('normal') or {'x': 0, 'y': 0, 'z': 1},
+                        'origin': face.get('origin') or {'x': 0, 'y': 0, 'z': 0},
                     }
-                    matched_selected_ids.update(matches)
-                    log(f"✅ Selected token {matched_id} resolved to face {fid} on body {bid} ({body_data.get('name', 'Part')})")
+                    log(f"✅ Selected face {fid} resolved to body {bid} ({body_data.get('name', 'Part')})")
 
-            if len(available_body_samples) < 10:
-                body_sample['face_samples'] = body_sample['face_samples'][:8]
-                available_body_samples.append(body_sample)
-
-        missing = [fid for fid in selected_face_ids if fid not in matched_selected_ids]
-        self.selection_resolution_debug = {
-            'selected_face_ids': selected_face_ids,
-            'matched_selected_ids': sorted(matched_selected_ids),
-            'missing_selected_ids': missing,
-            'available_body_count': len(bodies_with_faces),
-            'available_body_samples': available_body_samples,
-            'available_face_samples': available_face_samples,
-        }
-
+        missing = [fid for fid in selected_face_ids if not any(v['face_id'] == fid for v in selected_by_body.values())]
         if missing:
             log(f"⚠️  Could not resolve selected face IDs: {missing}")
 
@@ -2353,7 +2225,7 @@ class OnshapeClient:
             log("❌ None of the selected faces resolved to solid bodies")
             return []
 
-        results = list(cached_results)
+        results = []
         for bid, item in selected_by_body.items():
             part_name = item['part_name']
             face_id = item['face_id']
@@ -2394,35 +2266,13 @@ class OnshapeClient:
                 continue
 
             safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or bid
-            filename = f"{safe_name}.dxf"
-            result_entry = {
+            results.append({
                 'content': dxf_content,
-                'filename': filename,
+                'filename': f"{safe_name}.dxf",
                 'body_id': bid,
                 'part_name': part_name,
                 'source_face_id': face_id,
-            }
-            results.append(result_entry)
-
-            cache_metadata = {
-                'filename': filename,
-                'body_id': bid,
-                'part_name': part_name,
-                'source_face_id': face_id,
-                'multilayer': bool(multilayer),
-                'export_scope': 'selected-face',
-            }
-            for selected_id_for_cache in {item.get('selected_id'), face_id}:
-                if selected_id_for_cache:
-                    self._write_cached_dxf_export(
-                        self._selected_face_cache_key(
-                            document_id, workspace_id, element_id,
-                            selected_id_for_cache, multilayer=multilayer
-                        ),
-                        dxf_content,
-                        cache_metadata,
-                    )
-
+            })
             log(f"✅ Exported selected body {bid} ({part_name}) → {safe_name}.dxf ({len(dxf_content)} bytes)")
 
         log(f"\n{'='*70}")
@@ -2482,20 +2332,6 @@ class OnshapeClient:
                     log(f"⚠️  No top face found for body {bid} – skipping")
                     continue
 
-                body_cache_key = self._body_export_cache_key(
-                    document_id, workspace_id, element_id, bid, face_id, multilayer=multilayer
-                )
-                cached_export = self._read_cached_dxf_export(body_cache_key)
-                if cached_export:
-                    results.append(
-                        self._cache_result_from_entry(
-                            cached_export,
-                            fallback_filename=f'{bid}.dxf'
-                        )
-                    )
-                    log(f"♻️  Cached body export used for {bid} ({part_name})")
-                    continue
-
                 # Get the face origin for the multilayer export
                 reference_origin = {'x': 0, 'y': 0, 'z': 0}
                 for body in faces_data.get('bodies', []):
@@ -2545,25 +2381,12 @@ class OnshapeClient:
                     continue
 
                 safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or bid
-                filename = f"{safe_name}.dxf"
                 results.append({
                     'content': dxf_content,
-                    'filename': filename,
+                    'filename': f"{safe_name}.dxf",
                     'body_id': bid,
                     'part_name': part_name,
                 })
-                self._write_cached_dxf_export(
-                    body_cache_key,
-                    dxf_content,
-                    {
-                        'filename': filename,
-                        'body_id': bid,
-                        'part_name': part_name,
-                        'source_face_id': face_id,
-                        'multilayer': bool(multilayer),
-                        'export_scope': 'body',
-                    },
-                )
                 log(f"✅ Exported body {bid} ({part_name}) → {safe_name}.dxf ({len(dxf_content)} bytes)")
 
             except Exception as e:
