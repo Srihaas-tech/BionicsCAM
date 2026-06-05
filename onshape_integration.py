@@ -231,10 +231,11 @@ class OnshapeClient:
         query = parsed.query
         nonce = str(uuid.uuid4())
         date = formatdate(usegmt=True)
-        content_type = signed_headers.get('Content-Type') or ('application/json' if has_json_body else '')
-
-        if content_type:
-            signed_headers['Content-Type'] = content_type
+        # Onshape's published API-key samples sign GET requests with
+        # Content-Type: application/json too. Leaving it blank can make the
+        # HMAC string differ from what Onshape expects.
+        content_type = signed_headers.get('Content-Type') or 'application/json'
+        signed_headers['Content-Type'] = content_type
 
         string_to_sign = '\n'.join([
             method.lower(),
@@ -257,6 +258,7 @@ class OnshapeClient:
             'On-Nonce': nonce,
             'Authorization': f'On {access_key}:HmacSHA256:{signature}',
             'Accept': 'application/json',
+            'User-Agent': 'BionicsCAM Onshape API Client',
         })
         return signed_headers
 
