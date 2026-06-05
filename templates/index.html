@@ -829,6 +829,9 @@
         }
     </style>
 </head>
+
+
+    
 <body>
     <!-- Part Selection Modal (shown when multiple parts detected) -->
     {% if part_selection %}
@@ -903,8 +906,7 @@
         <section class="hero">
             <div>
                 <div class="eyebrow">FRC Team 4909 · CNC workflow</div>
-                <h1>Generate <span>clean</span><br>G-code fast.</h1>
-                <p>Upload DXF geometry, tune machining parameters, orient the setup, preview the toolpath, then download or save the finished NC program.</p>
+              
             </div>
             <div class="hero-actions">
                 <a href="/onshape/auth" id="onshapeConnectBtn" class="mini-btn primary-link">Import from Onshape</a>
@@ -913,6 +915,7 @@
         </section>
 
         <div class="workflow">
+            
             <!-- Left Panel: Input & Parameters -->
             <div class="stack">
                 <!-- Step 1: File Upload -->
@@ -926,8 +929,7 @@
                     <!-- Big drop zone (shown when no file loaded) -->
                     <div class="drop-zone" id="dropZone">
                         <div class="drop-zone-icon"></div>
-                        <div class="drop-zone-text">Drag & drop your DXF files here</div>
-                        <div class="drop-zone-hint">or click to browse files</div>
+                        <div class="drop-zone-text">Click to browse files</div>
                         <input type="file" id="fileInput" accept=".dxf" multiple style="display: none;">
                     </div>
 
@@ -954,7 +956,7 @@
                 <div class="panel">
                     <div class="panel-header">
                         <div class="step-number">2</div>
-                        <div class="panel-title">Set Parameters</div>
+                        <div class="panel-title">Change Settings</div>
                         <div class="panel-subtitle">Material + tool</div>
                     </div>
 
@@ -1037,7 +1039,7 @@
                                 <input type="number" id="toolDiameter" step="0.001" value="{{ default_tool_diameter }}" min="0.01" required>
                             </div>
 
-                            <div class="param-group" style="display: none;">
+                            <div class="param-group">
                                 <label>
                                     Tab Spacing
                                     <span class="label-hint">Distance between tabs</span>
@@ -1075,7 +1077,8 @@
                         </div>
 
                         <div class="section-rule"></div>
-
+                        
+                            <!-- 2.5D button: Depreciated.
                         <div class="check-card">
                             <label>
                                 <input type="checkbox" id="use25d">
@@ -1084,7 +1087,8 @@
                                     <span class="label-hint">Use layered DXF depth processing when depth layers are present.</span>
                                 </span>
                             </label>
-                        </div>
+                        </div> -->
+                        
                     </form>
                 </div>
 
@@ -1092,7 +1096,7 @@
                 <div class="panel action-card">
                     <div class="panel-header">
                         <div class="step-number">3</div>
-                        <div class="panel-title">Generate Program</div>
+                        <div class="panel-title">Create NC file</div>
                         <div class="panel-subtitle">Output</div>
                     </div>
 
