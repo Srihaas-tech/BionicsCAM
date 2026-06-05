@@ -244,6 +244,124 @@ class OnshapeClient:
         upper = preview.upper()
         return upper.startswith('0\nSECTION') or 'SECTION' in upper[:80]
 
+    def _cache_enabled(self):
+        """Return True when local Onshape DXF export caching is enabled."""
+        value = os.environ.get('ONSHAPE_DXF_CACHE_ENABLED', '1').strip().lower()
+        return value not in ('0', 'false', 'no', 'off')
+
+    def _get_dxf_cache_dir(self):
+        """Return/create the local DXF cache directory.
+
+        Vercel only guarantees writable storage under /tmp. On a Raspberry Pi
+        this can be overridden with ONSHAPE_DXF_CACHE_DIR for persistence.
+        """
+        cache_dir = os.environ.get('ONSHAPE_DXF_CACHE_DIR') or '/tmp/bionicscam_onshape_dxf_cache'
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            return cache_dir
+        except Exception as e:
+            log(f"⚠️  Could not create Onshape DXF cache dir {cache_dir}: {e}")
+            return None
+
+    def _dxf_cache_key(self, namespace, **parts):
+        """Create a stable cache key without exposing secrets."""
+        payload = {
+            'namespace': namespace,
+            'cache_version': 'v2',
+            'cache_buster': os.environ.get('ONSHAPE_DXF_CACHE_BUSTER', ''),
+            **parts,
+        }
+        raw = json.dumps(payload, sort_keys=True, default=str).encode('utf-8')
+        return hashlib.sha256(raw).hexdigest()
+
+    def _cache_paths(self, cache_key):
+        cache_dir = self._get_dxf_cache_dir()
+        if not cache_dir:
+            return None, None
+        return (
+            os.path.join(cache_dir, f'{cache_key}.dxf'),
+            os.path.join(cache_dir, f'{cache_key}.json'),
+        )
+
+    def _read_cached_dxf_export(self, cache_key):
+        """Read a cached DXF export plus metadata, if valid."""
+        if not self._cache_enabled():
+            return None
+        dxf_path, meta_path = self._cache_paths(cache_key)
+        if not dxf_path or not os.path.exists(dxf_path):
+            return None
+        try:
+            with open(dxf_path, 'rb') as f:
+                content = f.read()
+            if not self._looks_like_dxf(content):
+                log(f"⚠️  Ignoring invalid cached DXF: {dxf_path}")
+                return None
+            metadata = {}
+            if meta_path and os.path.exists(meta_path):
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+            log(f"♻️  Onshape DXF cache hit: {cache_key[:12]}")
+            return {'content': content, 'metadata': metadata}
+        except Exception as e:
+            log(f"⚠️  Failed to read Onshape DXF cache {cache_key[:12]}: {e}")
+            return None
+
+    def _write_cached_dxf_export(self, cache_key, content, metadata=None):
+        """Write a DXF export to cache. Failures are non-fatal."""
+        if not self._cache_enabled() or not self._looks_like_dxf(content):
+            return
+        dxf_path, meta_path = self._cache_paths(cache_key)
+        if not dxf_path:
+            return
+        try:
+            tmp_path = f'{dxf_path}.tmp'
+            with open(tmp_path, 'wb') as f:
+                f.write(content if isinstance(content, bytes) else str(content).encode('utf-8'))
+            os.replace(tmp_path, dxf_path)
+            if meta_path:
+                meta = dict(metadata or {})
+                meta['cached_at'] = datetime.utcnow().isoformat() + 'Z'
+                tmp_meta = f'{meta_path}.tmp'
+                with open(tmp_meta, 'w', encoding='utf-8') as f:
+                    json.dump(meta, f, indent=2, sort_keys=True)
+                os.replace(tmp_meta, meta_path)
+            log(f"💾 Onshape DXF cached: {cache_key[:12]}")
+        except Exception as e:
+            log(f"⚠️  Failed to write Onshape DXF cache {cache_key[:12]}: {e}")
+
+    def _selected_face_cache_key(self, document_id, workspace_id, element_id, selected_face_id, multilayer=False):
+        return self._dxf_cache_key(
+            'selected-face-export',
+            document_id=document_id,
+            workspace_id=workspace_id,
+            element_id=element_id,
+            selected_face_id=selected_face_id,
+            multilayer=bool(multilayer),
+        )
+
+    def _body_export_cache_key(self, document_id, workspace_id, element_id, body_id, face_id, multilayer=False):
+        return self._dxf_cache_key(
+            'body-export',
+            document_id=document_id,
+            workspace_id=workspace_id,
+            element_id=element_id,
+            body_id=body_id,
+            face_id=face_id,
+            multilayer=bool(multilayer),
+        )
+
+    def _cache_result_from_entry(self, cache_entry, fallback_filename='cached_onshape_part.dxf'):
+        metadata = cache_entry.get('metadata') or {}
+        filename = metadata.get('filename') or fallback_filename
+        return {
+            'content': cache_entry['content'],
+            'filename': filename,
+            'body_id': metadata.get('body_id', 'cached'),
+            'part_name': metadata.get('part_name', 'Cached Onshape Part'),
+            'source_face_id': metadata.get('source_face_id'),
+            'from_cache': True,
+        }
+
     def _make_api_key_headers(self, method, url, headers=None):
         """Create Onshape API-key HMAC headers without logging secrets."""
         access_key = os.environ.get('ONSHAPE_ACCESS_KEY')
@@ -515,6 +633,25 @@ class OnshapeClient:
         if face_normal:
             log(f"Normal: ({face_normal.get('x', 0):.3f}, {face_normal.get('y', 0):.3f}, {face_normal.get('z', 0):.3f})")
 
+        normal_key = None
+        if face_normal:
+            normal_key = {
+                axis: round(float(face_normal.get(axis, 0) or 0), 6)
+                for axis in ('x', 'y', 'z')
+            }
+        face_export_cache_key = self._dxf_cache_key(
+            'flat-face-export',
+            document_id=document_id,
+            workspace_id=workspace_id,
+            element_id=element_id,
+            face_id=face_id,
+            body_id=body_id,
+            face_normal=normal_key,
+        )
+        cached_export = self._read_cached_dxf_export(face_export_cache_key)
+        if cached_export:
+            return cached_export['content']
+
         # Method 1: selected-face export. This is the same family of endpoint
         # Onshape uses for right-click/export flows and is the only reliable
         # route we have found for topology face IDs like JjG / KnKF.
@@ -549,6 +686,17 @@ class OnshapeClient:
 
             if response.status_code == 200 and self._looks_like_dxf(response.content):
                 log(f"✅ Selected-face DXF export succeeded: {len(response.content)} bytes")
+                self._write_cached_dxf_export(
+                    face_export_cache_key,
+                    response.content,
+                    {
+                        'filename': f'{body_id or face_id}.dxf',
+                        'body_id': body_id,
+                        'part_name': body_id or face_id,
+                        'source_face_id': face_id,
+                        'export_method': 'exportinternal-selected-face',
+                    },
+                )
                 return response.content
 
             log(f"Selected-face export failed/invalid: {response.status_code}")
@@ -569,6 +717,17 @@ class OnshapeClient:
                 timeout=45,
             )
             if result:
+                self._write_cached_dxf_export(
+                    face_export_cache_key,
+                    result,
+                    {
+                        'filename': f'{body_id}.dxf',
+                        'body_id': body_id,
+                        'part_name': body_id,
+                        'source_face_id': face_id,
+                        'export_method': 'translation-body-fallback',
+                    },
+                )
                 return result
 
         log("\n=== Selected DXF export failed ===")
@@ -2073,6 +2232,32 @@ class OnshapeClient:
             return []
 
         selected_face_ids = [str(fid).strip() for fid in selected_face_ids if str(fid).strip()]
+
+        cached_results = []
+        selected_face_ids_to_resolve = []
+        for selected_id in selected_face_ids:
+            cache_key = self._selected_face_cache_key(
+                document_id, workspace_id, element_id, selected_id, multilayer=multilayer
+            )
+            cached_export = self._read_cached_dxf_export(cache_key)
+            if cached_export:
+                cached_results.append(
+                    self._cache_result_from_entry(
+                        cached_export,
+                        fallback_filename=f'{selected_id}.dxf'
+                    )
+                )
+            else:
+                selected_face_ids_to_resolve.append(selected_id)
+
+        if cached_results and not selected_face_ids_to_resolve:
+            log(f"♻️  All {len(cached_results)} selected Onshape DXF(s) served from cache; skipping bodydetails/export calls")
+            return cached_results
+
+        if cached_results:
+            log(f"♻️  {len(cached_results)} selected Onshape DXF(s) served from cache; resolving {len(selected_face_ids_to_resolve)} uncached selection(s)")
+
+        selected_face_ids = selected_face_ids_to_resolve
         selected_face_set = set(selected_face_ids)
 
         faces_data = self.list_faces(document_id, workspace_id, element_id)
@@ -2168,7 +2353,7 @@ class OnshapeClient:
             log("❌ None of the selected faces resolved to solid bodies")
             return []
 
-        results = []
+        results = list(cached_results)
         for bid, item in selected_by_body.items():
             part_name = item['part_name']
             face_id = item['face_id']
@@ -2209,13 +2394,35 @@ class OnshapeClient:
                 continue
 
             safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or bid
-            results.append({
+            filename = f"{safe_name}.dxf"
+            result_entry = {
                 'content': dxf_content,
-                'filename': f"{safe_name}.dxf",
+                'filename': filename,
                 'body_id': bid,
                 'part_name': part_name,
                 'source_face_id': face_id,
-            })
+            }
+            results.append(result_entry)
+
+            cache_metadata = {
+                'filename': filename,
+                'body_id': bid,
+                'part_name': part_name,
+                'source_face_id': face_id,
+                'multilayer': bool(multilayer),
+                'export_scope': 'selected-face',
+            }
+            for selected_id_for_cache in {item.get('selected_id'), face_id}:
+                if selected_id_for_cache:
+                    self._write_cached_dxf_export(
+                        self._selected_face_cache_key(
+                            document_id, workspace_id, element_id,
+                            selected_id_for_cache, multilayer=multilayer
+                        ),
+                        dxf_content,
+                        cache_metadata,
+                    )
+
             log(f"✅ Exported selected body {bid} ({part_name}) → {safe_name}.dxf ({len(dxf_content)} bytes)")
 
         log(f"\n{'='*70}")
@@ -2275,6 +2482,20 @@ class OnshapeClient:
                     log(f"⚠️  No top face found for body {bid} – skipping")
                     continue
 
+                body_cache_key = self._body_export_cache_key(
+                    document_id, workspace_id, element_id, bid, face_id, multilayer=multilayer
+                )
+                cached_export = self._read_cached_dxf_export(body_cache_key)
+                if cached_export:
+                    results.append(
+                        self._cache_result_from_entry(
+                            cached_export,
+                            fallback_filename=f'{bid}.dxf'
+                        )
+                    )
+                    log(f"♻️  Cached body export used for {bid} ({part_name})")
+                    continue
+
                 # Get the face origin for the multilayer export
                 reference_origin = {'x': 0, 'y': 0, 'z': 0}
                 for body in faces_data.get('bodies', []):
@@ -2324,12 +2545,25 @@ class OnshapeClient:
                     continue
 
                 safe_name = re.sub(r'[^\w\-]+', '_', part_name).strip('_') or bid
+                filename = f"{safe_name}.dxf"
                 results.append({
                     'content': dxf_content,
-                    'filename': f"{safe_name}.dxf",
+                    'filename': filename,
                     'body_id': bid,
                     'part_name': part_name,
                 })
+                self._write_cached_dxf_export(
+                    body_cache_key,
+                    dxf_content,
+                    {
+                        'filename': filename,
+                        'body_id': bid,
+                        'part_name': part_name,
+                        'source_face_id': face_id,
+                        'multilayer': bool(multilayer),
+                        'export_scope': 'body',
+                    },
+                )
                 log(f"✅ Exported body {bid} ({part_name}) → {safe_name}.dxf ({len(dxf_content)} bytes)")
 
             except Exception as e:
