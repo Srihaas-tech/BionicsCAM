@@ -1670,29 +1670,6 @@ def api_onshape_auth_mode():
         'onshape_backend_auth_mode': 'api_key' if (has_access and has_secret) else 'oauth',
     })
 
-
-@app.route('/api/onshape-auth-test')
-def api_onshape_auth_test():
-    """Make one tiny Onshape API call and return safe auth diagnostics."""
-    try:
-        client = get_onshape_client()
-        response = client._make_api_request('GET', '/users/sessioninfo')
-        body_preview = response.text[:1000] if hasattr(response, 'text') else ''
-        return jsonify({
-            'ok': response.status_code == 200,
-            'auth_mode': 'api_key' if client.has_api_key_auth() else 'oauth',
-            'status_code': response.status_code,
-            'content_type': response.headers.get('content-type', ''),
-            'response_preview': body_preview,
-            'last_onshape_api_error': getattr(client, 'last_onshape_api_error', None),
-        }), (200 if response.status_code == 200 else 502)
-    except Exception as exc:
-        return jsonify({
-            'ok': False,
-            'error': str(exc),
-            'auth_mode': 'api_key' if (os.environ.get('ONSHAPE_ACCESS_KEY') and os.environ.get('ONSHAPE_SECRET_KEY')) else 'oauth',
-        }), 500
-
 @app.route('/onshape/import', methods=['GET', 'POST'])
 @limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
 def onshape_import():
@@ -1889,17 +1866,20 @@ def onshape_import():
                         'debug': api_limit_error,
                     }), 429
 
+                debug = {
+                    'onshape_backend_auth_mode': 'api_key' if client.has_api_key_auth() else 'oauth',
+                    'multi_parts': multi_parts,
+                    'multilayer': multilayer_for_multi,
+                    'selected_face_count': len(selected_face_ids),
+                }
                 last_error = getattr(client, 'last_onshape_api_error', None)
+                if last_error:
+                    debug['last_onshape_api_error'] = last_error
+
                 return jsonify({
                     'error': 'No parts could be exported from this document',
                     'message': empty_message,
-                    'debug': {
-                        'onshape_backend_auth_mode': 'api_key' if client.has_api_key_auth() else 'oauth',
-                        'selected_face_count': len(selected_face_ids) if 'selected_face_ids' in locals() else 0,
-                        'multi_parts': multi_parts,
-                        'multilayer': multilayer_for_multi if 'multilayer_for_multi' in locals() else None,
-                        'last_onshape_api_error': last_error,
-                    }
+                    'debug': debug,
                 }), 500
 
             dxf_files_inline = []
