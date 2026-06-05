@@ -6,15 +6,16 @@ Handles OAuth authentication and DXF export from Onshape
 import logging
 import math
 import os
-import hashlib
-import hmac
 import re
 import sys
 import json
 import tempfile
 import time
 import traceback
-import uuid
+import hmac
+import hashlib
+import secrets
+import string
 from email.utils import formatdate
 
 import ezdxf
@@ -22,7 +23,7 @@ import requests
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from urllib.parse import urlencode, parse_qs, urlsplit
+from urllib.parse import urlencode, parse_qs, urlparse
 
 from flask import session
 from shapely.geometry import Point, Polygon, LineString
@@ -54,8 +55,6 @@ class OnshapeClient:
         self.access_token = None
         self.refresh_token = None
         self.token_expires = None
-        self._auth_mode_logged = False
-        self.last_onshape_api_error = None
     
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
@@ -70,6 +69,20 @@ class OnshapeClient:
         # Override with environment variables (these take precedence)
         config['client_id'] = os.environ.get('ONSHAPE_CLIENT_ID', config.get('client_id', 'VKDKRMPYLAC3PE6YNHRWFGRTW37ZFWTG2IDE5UI='))
         config['client_secret'] = os.environ.get('ONSHAPE_CLIENT_SECRET', config.get('client_secret'))
+
+        # Optional API-key auth. If present, backend API calls use these keys
+        # instead of OAuth Bearer tokens. This makes BionicsCAM consume the
+        # normal Onshape API-key request bucket shown on the Developer page.
+        config['access_key'] = (
+            os.environ.get('ONSHAPE_ACCESS_KEY')
+            or os.environ.get('ONSHAPE_API_ACCESS_KEY')
+            or config.get('access_key')
+        )
+        config['secret_key'] = (
+            os.environ.get('ONSHAPE_SECRET_KEY')
+            or os.environ.get('ONSHAPE_API_SECRET_KEY')
+            or config.get('secret_key')
+        )
         
         # Set defaults for other fields if not present
         if 'redirect_uri' not in config:
@@ -203,93 +216,15 @@ class OnshapeClient:
             log(f"Error refreshing token: {e}")
             return False
     
-    def api_key_credentials_configured(self):
-        """Return True when API-key credentials exist in the environment."""
-        return bool(os.environ.get('ONSHAPE_ACCESS_KEY') and os.environ.get('ONSHAPE_SECRET_KEY'))
-
-    def api_key_auth_enabled(self):
-        """Return True only when API-key auth is explicitly requested.
-
-        Quick-fix policy: OAuth is the default so each Onshape user can access
-        their own documents. API-key auth can still be enabled later by setting
-        ONSHAPE_BACKEND_AUTH_MODE=api_key or ONSHAPE_AUTH_MODE=api_key.
-        """
-        mode = (
-            os.environ.get('ONSHAPE_BACKEND_AUTH_MODE')
-            or os.environ.get('ONSHAPE_AUTH_MODE')
-            or ''
-        ).strip().lower().replace('-', '_')
-        return mode in ('api_key', 'apikey')
-
-    def has_api_key_auth(self):
-        """Return True when API-key auth should actively be used."""
-        return self.api_key_credentials_configured() and self.api_key_auth_enabled()
-
-    def get_auth_mode(self):
-        """Return the active backend auth mode without exposing secrets."""
-        return 'api_key' if self.has_api_key_auth() else 'oauth'
-
-    def _log_auth_mode_once(self):
-        """Log auth mode without exposing secrets."""
-        if self._auth_mode_logged:
-            return
-        mode = self.get_auth_mode()
-        log(f"🔐 Onshape auth mode: {mode}")
-        if self.api_key_credentials_configured() and not self.api_key_auth_enabled():
-            log("🔐 Onshape API keys are configured but ignored because OAuth-only mode is active")
-            log("   Set ONSHAPE_BACKEND_AUTH_MODE=api_key to re-enable API-key backend calls")
-        self._auth_mode_logged = True
-
-    def _make_api_key_headers(self, method, url, headers=None, has_json_body=False):
-        """Create Onshape API-key HMAC headers.
-
-        This intentionally logs only the auth mode. It never logs the access key,
-        secret key, nonce, or signature.
-        """
-        access_key = os.environ.get('ONSHAPE_ACCESS_KEY')
-        secret_key = os.environ.get('ONSHAPE_SECRET_KEY')
-        if not access_key or not secret_key:
-            raise ValueError('Onshape API-key auth requested but key env vars are missing')
-
-        signed_headers = dict(headers or {})
-        parsed = urlsplit(url)
-        path = parsed.path
-        query = parsed.query
-        nonce = str(uuid.uuid4())
-        date = formatdate(usegmt=True)
-        # Onshape's published API-key samples sign GET requests with
-        # Content-Type: application/json too. Leaving it blank can make the
-        # HMAC string differ from what Onshape expects.
-        content_type = signed_headers.get('Content-Type') or 'application/json'
-        signed_headers['Content-Type'] = content_type
-
-        string_to_sign = '\n'.join([
-            method.lower(),
-            nonce.lower(),
-            date.lower(),
-            content_type.lower(),
-            path.lower(),
-            query.lower(),
-            '',
-        ])
-        digest = hmac.new(
-            secret_key.encode('utf-8'),
-            string_to_sign.encode('utf-8'),
-            hashlib.sha256,
-        ).digest()
-        signature = base64.b64encode(digest).decode('utf-8')
-
-        signed_headers.update({
-            'Date': date,
-            'On-Nonce': nonce,
-            'Authorization': f'On {access_key}:HmacSHA256:{signature}',
-            'Accept': 'application/json',
-            'User-Agent': 'BionicsCAM Onshape API Client',
-        })
-        return signed_headers
+    def _has_api_key_auth(self):
+        """Return True when Onshape API-key credentials are configured."""
+        return bool(self.config.get('access_key') and self.config.get('secret_key'))
 
     def _ensure_valid_token(self):
-        """Ensure we have a valid access token"""
+        """Ensure we have a valid access token, unless API-key auth is configured."""
+        if self._has_api_key_auth():
+            return
+
         if not self.access_token:
             raise ValueError("No access token. User must authenticate first.")
         
@@ -297,63 +232,72 @@ class OnshapeClient:
         if self.token_expires and datetime.now() >= self.token_expires - timedelta(minutes=5):
             if not self.refresh_access_token():
                 raise ValueError("Token expired and refresh failed")
+
+    def _make_api_key_headers(self, method, full_url, content_type):
+        """Build Onshape API-key HMAC headers for one request URL."""
+        access_key = self.config.get('access_key')
+        secret_key = self.config.get('secret_key')
+        nonce = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(25))
+        date_header = formatdate(timeval=None, localtime=False, usegmt=True)
+        parsed = urlparse(full_url)
+        path = parsed.path or ''
+        query = parsed.query or ''
+        signing_string = (
+            f"{method.upper()}\n"
+            f"{nonce}\n"
+            f"{date_header}\n"
+            f"{content_type}\n"
+            f"{path}\n"
+            f"{query}\n"
+        ).lower()
+        digest = hmac.new(
+            secret_key.encode('utf-8'),
+            signing_string.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+        signature = base64.b64encode(digest).decode('utf-8')
+        return {
+            'Date': date_header,
+            'On-Nonce': nonce,
+            'Authorization': f'On {access_key}:HmacSHA256:{signature}',
+        }
     
     def _make_api_request(self, method, endpoint, **kwargs):
         """
         Make an authenticated API request to Onshape.
 
-        Backend API calls prefer API-key auth when ONSHAPE_ACCESS_KEY and
-        ONSHAPE_SECRET_KEY exist. OAuth remains as a fallback for local/dev use.
+        If ONSHAPE_ACCESS_KEY/ONSHAPE_SECRET_KEY are configured, use
+        Onshape API-key HMAC auth. Otherwise, fall back to OAuth Bearer auth.
+        
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            endpoint: API endpoint (e.g., '/documents/d/...')
+            **kwargs: Additional arguments for requests
+            
+        Returns:
+            Response object
         """
-        self._log_auth_mode_once()
-
+        method = method.upper()
         url = f"{self.API_BASE}{endpoint}"
-        headers = kwargs.pop('headers', {}) or {}
-        params = kwargs.get('params')
-        request_kwargs = dict(kwargs)
+        headers = dict(kwargs.pop('headers', {}) or {})
 
-        if self.has_api_key_auth():
-            # Prepare the exact URL requests will send, including query params,
-            # so the HMAC signature matches the final request path/query.
-            req = requests.Request(method, url, params=params)
-            prepared = req.prepare()
-            signed_headers = self._make_api_key_headers(
-                method,
-                prepared.url,
-                headers=headers,
-                has_json_body=('json' in kwargs and kwargs.get('json') is not None),
-            )
-            response = requests.request(method, url, headers=signed_headers, **request_kwargs)
-            self._record_onshape_response(method, endpoint, response)
-            return response
+        if self._has_api_key_auth():
+            # The HMAC signature must include the final query string, so prepare
+            # params into the URL before signing and then remove params from
+            # kwargs to avoid appending them twice.
+            params = kwargs.pop('params', None)
+            prepared = requests.Request(method, url, params=params).prepare()
+            signed_url = prepared.url or url
+            content_type = headers.get('Content-Type') or 'application/json'
+            headers.setdefault('Content-Type', content_type)
+            headers.setdefault('Accept', 'application/json;charset=UTF-8; qs=0.09')
+            headers.update(self._make_api_key_headers(method, signed_url, content_type))
+            return requests.request(method, signed_url, headers=headers, **kwargs)
 
         self._ensure_valid_token()
         headers['Authorization'] = f'Bearer {self.access_token}'
-        response = requests.request(method, url, headers=headers, **request_kwargs)
-        self._record_onshape_response(method, endpoint, response)
-        return response
+        return requests.request(method, url, headers=headers, **kwargs)
     
-    def _record_onshape_response(self, method, endpoint, response):
-        """Store the last failing Onshape API response for safe UI diagnostics."""
-        if 200 <= getattr(response, 'status_code', 0) < 300:
-            self.last_onshape_api_error = None
-            return
-
-        preview = ''
-        try:
-            preview = response.text[:800]
-        except Exception:
-            preview = '<response text unavailable>'
-
-        self.last_onshape_api_error = {
-            'auth_mode': self.get_auth_mode(),
-            'method': method,
-            'endpoint': endpoint,
-            'status_code': getattr(response, 'status_code', None),
-            'content_type': response.headers.get('Content-Type') if hasattr(response, 'headers') else None,
-            'response_preview': preview,
-        }
-
     def get_user_info(self):
         """Get information about the authenticated user"""
         try:
@@ -557,18 +501,9 @@ class OnshapeClient:
         # /exportinternal call is an internal web-client endpoint and can return
         # misleading 402 responses even when the normal Developer API counter is
         # not exhausted.
-        log("\n[Method 1] Trying public Part Studio translations API with selected part/body ID...")
-        # The public translations API's partIds field expects visible part/body IDs,
-        # not topology face IDs like JPK/JjG. Passing a face ID produces
-        # "No visible parts to export". When we already resolved the selected
-        # face back to its owning body, export that body here.
-        selected_export_id = body_id or face_id
-        if body_id:
-            log(f"Using resolved body_id for public DXF translation: {selected_export_id}")
-        else:
-            log(f"No body_id supplied; falling back to selected face_id: {selected_export_id}")
+        log("\n[Method 1] Trying public Part Studio translations API with selected ID...")
         selected_result = self.export_dxf_async(
-            document_id, workspace_id, element_id, part_ids=[selected_export_id]
+            document_id, workspace_id, element_id, part_ids=[face_id]
         )
         if selected_result:
             return selected_result
@@ -1797,6 +1732,122 @@ class OnshapeClient:
         except Exception as e:
             log(f"Error exporting faces: {e}")
             return None
+
+
+    def list_documents(self, query='', limit=25):
+        """
+        List Onshape documents visible to the authenticated user.
+
+        Returns a normalized list of dicts with id, name, workspace_id,
+        owner_name, modified_at, and href. Used by the BionicsCAM import
+        picker. This does not affect the existing Onshape extension flow.
+        """
+        try:
+            params = {
+                'limit': limit,
+                'sortColumn': 'modifiedAt',
+                'sortOrder': 'desc',
+            }
+            if query:
+                params['q'] = query
+
+            response = self._make_api_request('GET', '/documents', params=params)
+            if response.status_code != 200:
+                log(f"Failed to list documents: HTTP {response.status_code}")
+                log(f"Response: {response.text[:500]}")
+                return []
+
+            payload = response.json()
+            raw_items = payload.get('items') if isinstance(payload, dict) else payload
+            if raw_items is None:
+                raw_items = payload.get('documents', []) if isinstance(payload, dict) else []
+
+            documents = []
+            for item in raw_items or []:
+                doc_id = item.get('id') or item.get('documentId')
+                if not doc_id:
+                    continue
+
+                workspace = item.get('defaultWorkspace') or item.get('workspace') or {}
+                workspace_id = workspace.get('id') or item.get('defaultWorkspaceId') or item.get('workspaceId')
+
+                owner = item.get('owner') or {}
+                owner_name = owner.get('name') if isinstance(owner, dict) else ''
+
+                documents.append({
+                    'id': doc_id,
+                    'name': item.get('name') or 'Untitled document',
+                    'workspace_id': workspace_id,
+                    'owner_name': owner_name or 'Unknown owner',
+                    'modified_at': item.get('modifiedAt') or item.get('modified_at') or '',
+                    'href': f"{self.BASE_URL}/documents/{doc_id}" + (f"/w/{workspace_id}" if workspace_id else ''),
+                })
+
+            return documents
+        except Exception as e:
+            log(f"Error listing documents: {e}")
+            log(traceback.format_exc())
+            return []
+
+    def list_part_studio_elements(self, document_id, workspace_id):
+        """
+        List Part Studio elements in a document workspace.
+        """
+        try:
+            response = self._make_api_request(
+                'GET',
+                f'/documents/d/{document_id}/w/{workspace_id}/elements'
+            )
+            if response.status_code != 200:
+                log(f"Failed to list elements: HTTP {response.status_code}")
+                log(f"Response: {response.text[:500]}")
+                return []
+
+            elements = response.json()
+            part_studios = []
+            for elem in elements or []:
+                elem_type = str(elem.get('type') or elem.get('elementType') or '').upper().replace(' ', '')
+                if elem_type in ('PARTSTUDIO', 'PARTSTUDIOS') or 'PARTSTUDIO' in elem_type:
+                    elem_id = elem.get('id')
+                    if elem_id:
+                        part_studios.append({
+                            'id': elem_id,
+                            'name': elem.get('name') or 'Part Studio',
+                            'type': elem.get('type') or elem.get('elementType') or 'Part Studio',
+                            'href': f"{self.BASE_URL}/documents/{document_id}/w/{workspace_id}/e/{elem_id}",
+                        })
+
+            return part_studios
+        except Exception as e:
+            log(f"Error listing Part Studios: {e}")
+            log(traceback.format_exc())
+            return []
+
+    def list_parts_for_import(self, document_id, workspace_id, element_id):
+        """
+        Return one selectable row per solid/body in a Part Studio.
+        """
+        try:
+            bodies_with_faces = self.get_body_faces(document_id, workspace_id, element_id)
+            parts = []
+            for body_id, body_data in (bodies_with_faces or {}).items():
+                faces = body_data.get('faces', [])
+                planar_faces = [f for f in faces if f.get('surfaceType') == 'PLANE']
+                largest_planar_area = max((f.get('area', 0) or 0 for f in planar_faces), default=0)
+                parts.append({
+                    'body_id': body_id,
+                    'name': body_data.get('name') or body_id,
+                    'face_count': len(faces),
+                    'planar_face_count': len(planar_faces),
+                    'largest_planar_area': largest_planar_area,
+                })
+
+            parts.sort(key=lambda p: (p['largest_planar_area'], p['face_count']), reverse=True)
+            return parts
+        except Exception as e:
+            log(f"Error listing importable parts: {e}")
+            log(traceback.format_exc())
+            return []
 
     def get_document_info(self, document_id):
         """Get information about a document"""
