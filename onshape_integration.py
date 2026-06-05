@@ -1734,60 +1734,256 @@ class OnshapeClient:
             return None
 
 
+    def _document_debug_preview(self, response):
+        """Small, safe response preview for picker diagnostics."""
+        try:
+            text = response.text or ''
+            text = re.sub(r'(?i)(access[_-]?token|refresh[_-]?token|authorization)["\'\s:=]+[^,}\s]+', r'\1=<redacted>', text)
+            return text[:700]
+        except Exception:
+            return ''
+
+    def _record_document_list_attempt(self, label, response=None, error=None, count=None, params=None, body=None):
+        """Record non-secret details from document picker attempts."""
+        if not hasattr(self, 'last_document_list_debug') or self.last_document_list_debug is None:
+            self.last_document_list_debug = {'attempts': []}
+
+        attempt = {'label': label}
+        if response is not None:
+            attempt['status_code'] = response.status_code
+            attempt['ok'] = response.status_code == 200
+            attempt['preview'] = self._document_debug_preview(response)
+        if error:
+            attempt['error'] = str(error)
+        if count is not None:
+            attempt['count'] = count
+        if params:
+            attempt['params'] = {k: v for k, v in params.items() if k not in ('access_token', 'refresh_token')}
+        if body:
+            safe_body = dict(body)
+            for key in ('access_token', 'refresh_token', 'authorization'):
+                safe_body.pop(key, None)
+            attempt['body'] = safe_body
+        self.last_document_list_debug['attempts'].append(attempt)
+
+    def _extract_document_items(self, payload):
+        """Handle the different shapes returned by Onshape document endpoints."""
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ('items', 'documents', 'results'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+
+        # Some search responses wrap document summaries inside result objects.
+        wrapped_items = []
+        for key in ('hits', 'items'):
+            value = payload.get(key)
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                wrapped_items.append(item.get('document') or item.get('documentSummary') or item)
+        return wrapped_items
+
+    def _normalize_document_item(self, item):
+        """Normalize one Onshape document/search item for the picker."""
+        if not isinstance(item, dict):
+            return None
+
+        # Search responses may wrap the real document object.
+        item = item.get('document') or item.get('documentSummary') or item.get('node') or item
+
+        doc_id = (
+            item.get('id')
+            or item.get('documentId')
+            or item.get('document_id')
+            or item.get('did')
+        )
+        if not doc_id:
+            href = item.get('href') or item.get('uri') or ''
+            match = re.search(r'/documents/(?:d/)?([A-Za-z0-9]{20,32})', href)
+            if match:
+                doc_id = match.group(1)
+        if not doc_id:
+            return None
+
+        workspace = item.get('defaultWorkspace') or item.get('workspace') or item.get('workspaceInfo') or {}
+        if not isinstance(workspace, dict):
+            workspace = {}
+        workspace_id = (
+            workspace.get('id')
+            or workspace.get('workspaceId')
+            or item.get('defaultWorkspaceId')
+            or item.get('workspaceId')
+            or item.get('wid')
+        )
+
+        # Some global tree/search results expose workspace hrefs but not explicit IDs.
+        if not workspace_id:
+            href = item.get('href') or item.get('uri') or ''
+            match = re.search(r'/w/([A-Za-z0-9]{20,32})', href)
+            if match:
+                workspace_id = match.group(1)
+
+        owner = item.get('owner') or item.get('ownerInfo') or {}
+        if not isinstance(owner, dict):
+            owner = {}
+        owner_name = owner.get('name') or item.get('ownerName') or item.get('createdByName') or 'Unknown owner'
+
+        modified_at = (
+            item.get('modifiedAt')
+            or item.get('modified_at')
+            or item.get('lastModifiedAt')
+            or item.get('updatedAt')
+            or ''
+        )
+
+        return {
+            'id': doc_id,
+            'name': item.get('name') or item.get('documentName') or item.get('title') or 'Untitled document',
+            'workspace_id': workspace_id,
+            'owner_name': owner_name,
+            'modified_at': modified_at,
+            'href': f"{self.BASE_URL}/documents/{doc_id}" + (f"/w/{workspace_id}" if workspace_id else ''),
+        }
+
+    def _collect_document_items_from_response(self, label, response, params=None, body=None):
+        """Parse a document-list response and record debug info."""
+        if response.status_code != 200:
+            self._record_document_list_attempt(label, response=response, params=params, body=body, count=0)
+            log(f"Document list attempt '{label}' failed: HTTP {response.status_code}")
+            log(f"Response: {response.text[:500]}")
+            return []
+
+        try:
+            payload = response.json()
+        except Exception as exc:
+            self._record_document_list_attempt(label, response=response, error=exc, params=params, body=body, count=0)
+            return []
+
+        raw_items = self._extract_document_items(payload)
+        self._record_document_list_attempt(label, response=response, params=params, body=body, count=len(raw_items))
+        return raw_items
+
     def list_documents(self, query='', limit=25):
         """
         List Onshape documents visible to the authenticated user.
 
-        Returns a normalized list of dicts with id, name, workspace_id,
-        owner_name, modified_at, and href. Used by the BionicsCAM import
-        picker. This does not affect the existing Onshape extension flow.
+        The older picker only called GET /documents once. In practice that can
+        return an empty list depending on account/team ownership and endpoint
+        defaults, even when the user has many documents. This method tries the
+        normal document list, owner-scoped document lists, and the document
+        search endpoint, then de-duplicates results.
         """
+        query = (query or '').strip()
+        limit = max(1, min(int(limit or 25), 100))
+        self.last_document_list_debug = {'query': query, 'attempts': []}
+
+        raw_items = []
+
+        def add_items(label, method, endpoint, *, params=None, json_body=None):
+            try:
+                if method == 'POST':
+                    response = self._make_api_request(method, endpoint, json=json_body)
+                else:
+                    response = self._make_api_request(method, endpoint, params=params)
+                raw_items.extend(self._collect_document_items_from_response(label, response, params=params, body=json_body))
+            except Exception as exc:
+                self._record_document_list_attempt(label, error=exc, params=params, body=json_body, count=0)
+                log(f"Document list attempt '{label}' raised: {exc}")
+
+        # 1) The standard recent-documents endpoint.
+        base_params = {
+            'limit': limit,
+            'offset': 0,
+            'sortColumn': 'modifiedAt',
+            'sortOrder': 'desc',
+        }
+        if query:
+            base_params['q'] = query
+        add_items('GET /documents', 'GET', '/documents', params=base_params)
+
+        # 2) Search endpoint. This is better when the user typed a name, and it
+        # also helps with shared/team documents that do not appear in the basic
+        # list under some account configurations.
+        search_body = {
+            'foundIn': 'w',
+            'when': 'latest',
+            'documentFilter': 7,
+            'limit': limit,
+            'offset': 0,
+        }
+        if query:
+            search_body['rawQuery'] = query
+        else:
+            # Onshape search wants a query-like field; _all:* is accepted by the
+            # same search family used elsewhere in this integration and acts as
+            # a broad search when possible. If the API rejects it, the debug UI
+            # will show the real status/body instead of pretending there are no docs.
+            search_body['rawQuery'] = '_all:*'
+        add_items('POST /documents/search broad', 'POST', '/documents/search', json_body=search_body)
+
+        # 3) Owner-scoped lists. Many FRC documents live under a team/company
+        # owner rather than the individual OAuth user.
+        owners = []
         try:
-            params = {
-                'limit': limit,
-                'sortColumn': 'modifiedAt',
-                'sortOrder': 'desc',
-            }
-            if query:
-                params['q'] = query
+            user_info = self.get_user_session_info() or {}
+            user_id = user_info.get('id') or user_info.get('userId')
+            if user_id:
+                owners.append(('user', 0, user_id))
+        except Exception as exc:
+            self._record_document_list_attempt('GET /users/sessioninfo for owners', error=exc, count=0)
 
-            response = self._make_api_request('GET', '/documents', params=params)
-            if response.status_code != 200:
-                log(f"Failed to list documents: HTTP {response.status_code}")
-                log(f"Response: {response.text[:500]}")
-                return []
-
-            payload = response.json()
-            raw_items = payload.get('items') if isinstance(payload, dict) else payload
-            if raw_items is None:
-                raw_items = payload.get('documents', []) if isinstance(payload, dict) else []
-
-            documents = []
-            for item in raw_items or []:
-                doc_id = item.get('id') or item.get('documentId')
-                if not doc_id:
+        try:
+            for company in self.get_companies() or []:
+                owner_id = company.get('id')
+                if not owner_id:
                     continue
+                # Onshape commonly uses owner type 1 for company-owned docs;
+                # some education/team setups behave like type 2, so try both.
+                owners.append((company.get('name') or 'company', 1, owner_id))
+                owners.append((company.get('name') or 'team', 2, owner_id))
+        except Exception as exc:
+            self._record_document_list_attempt('GET /companies for owners', error=exc, count=0)
 
-                workspace = item.get('defaultWorkspace') or item.get('workspace') or {}
-                workspace_id = workspace.get('id') or item.get('defaultWorkspaceId') or item.get('workspaceId')
+        seen_owner_attempts = set()
+        for owner_label, owner_type, owner_id in owners:
+            key = (owner_type, owner_id)
+            if key in seen_owner_attempts:
+                continue
+            seen_owner_attempts.add(key)
 
-                owner = item.get('owner') or {}
-                owner_name = owner.get('name') if isinstance(owner, dict) else ''
+            owner_params = dict(base_params)
+            owner_params['ownerType'] = owner_type
+            owner_params['ownerId'] = owner_id
+            add_items(f'GET /documents owner {owner_label} type {owner_type}', 'GET', '/documents', params=owner_params)
 
-                documents.append({
-                    'id': doc_id,
-                    'name': item.get('name') or 'Untitled document',
-                    'workspace_id': workspace_id,
-                    'owner_name': owner_name or 'Unknown owner',
-                    'modified_at': item.get('modifiedAt') or item.get('modified_at') or '',
-                    'href': f"{self.BASE_URL}/documents/{doc_id}" + (f"/w/{workspace_id}" if workspace_id else ''),
-                })
+            owner_search = dict(search_body)
+            owner_search['ownerId'] = owner_id
+            add_items(f'POST /documents/search owner {owner_label} type {owner_type}', 'POST', '/documents/search', json_body=owner_search)
 
-            return documents
-        except Exception as e:
-            log(f"Error listing documents: {e}")
-            log(traceback.format_exc())
-            return []
+        documents_by_id = {}
+        for item in raw_items:
+            doc = self._normalize_document_item(item)
+            if not doc:
+                continue
+            # Prefer entries that include a default workspace because the next
+            # picker step needs one.
+            existing = documents_by_id.get(doc['id'])
+            if not existing or (doc.get('workspace_id') and not existing.get('workspace_id')):
+                documents_by_id[doc['id']] = doc
+
+        documents = list(documents_by_id.values())
+        documents.sort(key=lambda d: d.get('modified_at') or '', reverse=True)
+        documents = documents[:limit]
+        self.last_document_list_debug['normalized_count'] = len(documents)
+
+        return documents
 
     def list_part_studio_elements(self, document_id, workspace_id):
         """
