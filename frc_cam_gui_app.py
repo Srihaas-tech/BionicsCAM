@@ -396,46 +396,6 @@ else:
     app.secret_key = 'b20029bd9519dbbe19397c970f5ab6116cd6077cd7e1c09f61db5ea56e805519'
     log("🔒 Using hardcoded fallback FLASK_SECRET_KEY for container sync")
     
-
-@app.route('/api/build-info')
-def api_build_info():
-    """Tiny deployment/debug endpoint. Does not expose secrets."""
-    return jsonify({
-        'app': 'BionicsCAM',
-        'branch': os.environ.get('VERCEL_GIT_COMMIT_REF'),
-        'commit': os.environ.get('VERCEL_GIT_COMMIT_SHA'),
-        'vercel': bool(os.environ.get('VERCEL')),
-        'has_onshape_access_key': bool(os.environ.get('ONSHAPE_ACCESS_KEY')),
-        'has_onshape_secret_key': bool(os.environ.get('ONSHAPE_SECRET_KEY')),
-    })
-
-@app.route('/api/onshape-auth-mode')
-def api_onshape_auth_mode():
-    """Report backend Onshape auth mode without exposing secrets."""
-    mode = 'api_key' if (os.environ.get('ONSHAPE_ACCESS_KEY') and os.environ.get('ONSHAPE_SECRET_KEY')) else 'oauth'
-    return jsonify({
-        'onshape_backend_auth_mode': mode,
-        'has_onshape_access_key': bool(os.environ.get('ONSHAPE_ACCESS_KEY')),
-        'has_onshape_secret_key': bool(os.environ.get('ONSHAPE_SECRET_KEY')),
-    })
-
-@app.route('/api/onshape-auth-test')
-def api_onshape_auth_test():
-    """Make one safe Onshape sessioninfo call for auth diagnostics."""
-    if not ONSHAPE_AVAILABLE:
-        return jsonify({'ok': False, 'error': 'Onshape integration not available'}), 400
-    client = get_onshape_client()
-    response = client._make_api_request('GET', '/users/sessioninfo')
-    payload = {
-        'ok': response.status_code == 200,
-        'auth_mode': client.get_auth_mode() if hasattr(client, 'get_auth_mode') else 'unknown',
-        'status_code': response.status_code,
-        'content_type': response.headers.get('content-type', ''),
-        'response_preview': response.text[:1200],
-        'last_onshape_api_error': getattr(client, 'last_onshape_api_error', None),
-    }
-    return jsonify(payload), (200 if response.status_code == 200 else 500)
-
 # Initialize authentication if available
 if AUTH_AVAILABLE:
     auth = init_auth(app)
@@ -1674,6 +1634,47 @@ def debug_onshape_faces():
             'traceback': traceback.format_exc()
         }), 500
 
+
+@app.route('/api/build-info')
+def api_build_info():
+    """Tiny deployment sanity endpoint for debugging Vercel goblins."""
+    try:
+        import subprocess
+        commit = os.environ.get('VERCEL_GIT_COMMIT_SHA')
+        if not commit:
+            try:
+                commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], stderr=subprocess.DEVNULL).decode().strip()
+            except Exception:
+                commit = 'unknown'
+        return jsonify({
+            'ok': True,
+            'app': 'BionicsCAM',
+            'commit': commit,
+            'vercel_env': os.environ.get('VERCEL_ENV', 'local'),
+            'has_onshape_access_key': bool(os.environ.get('ONSHAPE_ACCESS_KEY')),
+            'has_onshape_secret_key': bool(os.environ.get('ONSHAPE_SECRET_KEY')),
+            'onshape_backend_auth_mode': 'api_key' if ((os.environ.get('ONSHAPE_BACKEND_AUTH_MODE') or os.environ.get('ONSHAPE_AUTH_MODE') or '').strip().lower().replace('-', '_') in ('api_key', 'apikey') and os.environ.get('ONSHAPE_ACCESS_KEY') and os.environ.get('ONSHAPE_SECRET_KEY')) else 'oauth',
+            'refresh_config_during_import': os.environ.get('ONSHAPE_REFRESH_CONFIG_DURING_IMPORT', ''),
+        })
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+@app.route('/api/onshape-auth-mode')
+def api_onshape_auth_mode():
+    """Show auth mode without exposing secrets."""
+    has_access = bool(os.environ.get('ONSHAPE_ACCESS_KEY'))
+    has_secret = bool(os.environ.get('ONSHAPE_SECRET_KEY'))
+    requested_mode = (os.environ.get('ONSHAPE_BACKEND_AUTH_MODE') or os.environ.get('ONSHAPE_AUTH_MODE') or '').strip().lower().replace('-', '_')
+    api_key_enabled = requested_mode in ('api_key', 'apikey') and has_access and has_secret
+    return jsonify({
+        'has_onshape_access_key': has_access,
+        'has_onshape_secret_key': has_secret,
+        'api_key_auth_enabled': api_key_enabled,
+        'oauth_only_mode': not api_key_enabled,
+        'requested_auth_mode': requested_mode or 'oauth',
+        'onshape_backend_auth_mode': 'api_key' if api_key_enabled else 'oauth',
+    })
+
 @app.route('/onshape/import', methods=['GET', 'POST'])
 @limiter.limit("20 per minute")  # Moderate limit - authenticated via Onshape OAuth
 def onshape_import():
@@ -1766,6 +1767,14 @@ def onshape_import():
         user_id = get_current_user_id()
         client = session_manager.get_client(user_id)
 
+        if client:
+            try:
+                mode = client.get_auth_mode() if hasattr(client, 'get_auth_mode') else ('api_key' if client.has_api_key_auth() else 'oauth')
+                log(f"ONSHAPE_BACKEND_AUTH_MODE={mode}")
+                log(f"ONSHAPE_API_KEY_ENV access={bool(os.environ.get('ONSHAPE_ACCESS_KEY'))} secret={bool(os.environ.get('ONSHAPE_SECRET_KEY'))}")
+            except Exception as auth_log_error:
+                log(f"Could not log Onshape auth mode: {auth_log_error}")
+
         if not client:
             # Store import parameters in session before redirecting to OAuth
             session['pending_onshape_import'] = {
@@ -1778,20 +1787,25 @@ def onshape_import():
             # Redirect to Onshape OAuth
             return redirect('/onshape/auth')
 
-        auth_mode = client.get_auth_mode() if hasattr(client, 'get_auth_mode') else 'oauth'
-        log(f"ONSHAPE_BACKEND_AUTH_MODE={auth_mode}")
-        log(f"ONSHAPE_API_KEY_ENV access={bool(os.environ.get('ONSHAPE_ACCESS_KEY'))} secret={bool(os.environ.get('ONSHAPE_SECRET_KEY'))}")
-
-        # Team config refresh is optional during Onshape import. It makes extra
-        # Onshape API calls before the actual DXF export, which makes auth/API
-        # debugging noisy. Default to local machine defaults unless explicitly
-        # requested.
-        if os.environ.get('ONSHAPE_REFRESH_CONFIG_DURING_IMPORT', '').lower() in ('1', 'true', 'yes'):
+        # Avoid burning Onshape API calls during import. Config discovery makes
+        # extra companies/documents/search calls before the actual part export,
+        # which is painful when we are debugging Onshape limits. Default to using
+        # the cached/default team config during imports; set
+        # ONSHAPE_REFRESH_CONFIG_DURING_IMPORT=1 to restore the old behavior.
+        refresh_config = os.environ.get('ONSHAPE_REFRESH_CONFIG_DURING_IMPORT', '').lower() in ('1', 'true', 'yes')
+        if refresh_config:
             log("\n" + "="*60)
             log("🔄 Refreshing team config from Onshape...")
             config_yaml = client.fetch_config_file(document_id=document_id)
             if config_yaml:
+                log(f"🔍 DEBUG: Raw YAML length: {len(config_yaml)} bytes")
+                log(f"🔍 DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
                 team_config = TeamConfig.from_yaml(config_yaml)
+                log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
+                log(f"🔍 DEBUG: team_config._data keys: {list(team_config._data.keys())}")
+                log(f"🔍 DEBUG: team_config._data has 'team' key? {'team' in team_config._data}")
+                if 'team' in team_config._data:
+                    log(f"🔍 DEBUG: team_config._data['team'] = {team_config._data['team']}")
                 session['team_config_data'] = team_config._data
                 session['team_config'] = team_config.to_dict()
                 session['team_number'] = team_config.team_number
@@ -1806,10 +1820,17 @@ def onshape_import():
                 session.pop('team_config_url', None)
                 session['using_default_config'] = True
             log("="*60 + "\n")
+
+            # Get document's owning company/classroom only when doing full config refresh.
+            doc_company = client.get_document_company(document_id)
+            if doc_company:
+                team_name = doc_company.get('name')
+                log(f"📚 Document company: {team_name}")
+                session['team_name'] = team_name
         else:
-            log("⏭️  Skipping PenguinCAM config/company discovery during Onshape import")
-            team_config = TeamConfig()
-            session.setdefault('team_config_data', {})
+            log("⚡ Skipping Onshape config/company discovery during import")
+            log("   Set ONSHAPE_REFRESH_CONFIG_DURING_IMPORT=1 to re-enable it")
+            team_config = TeamConfig(session.get('team_config_data', {}))
             session.setdefault('team_config', team_config.to_dict())
             session.setdefault('team_number', team_config.team_number)
             session.setdefault('using_default_config', True)
@@ -1839,8 +1860,19 @@ def onshape_import():
                 empty_message = 'BionicsCAM could not find/export any solid bodies with usable planar faces.'
 
             if not part_exports:
+                api_limit_error = getattr(client, 'last_api_limit_error', None)
+                if api_limit_error:
+                    return jsonify({
+                        'error': 'Onshape API limit exceeded',
+                        'message': (
+                            'Onshape rejected the selected-part export because the API limit/quota was exceeded. '
+                            'Wait a bit, reduce repeated import attempts, or use manual DXF export/upload until the quota resets.'
+                        ),
+                        'debug': api_limit_error,
+                    }), 429
+
                 debug = {
-                    'onshape_backend_auth_mode': client.get_auth_mode() if hasattr(client, 'get_auth_mode') else 'unknown',
+                    'onshape_backend_auth_mode': client.get_auth_mode() if hasattr(client, 'get_auth_mode') else ('api_key' if client.has_api_key_auth() else 'oauth'),
                     'multi_parts': multi_parts,
                     'multilayer': multilayer_for_multi,
                     'selected_face_count': len(selected_face_ids),
@@ -1848,13 +1880,11 @@ def onshape_import():
                 last_error = getattr(client, 'last_onshape_api_error', None)
                 if last_error:
                     debug['last_onshape_api_error'] = last_error
-                selection_debug = getattr(client, 'selection_resolution_debug', None)
-                if selection_debug:
-                    debug['selection_resolution'] = selection_debug
+
                 return jsonify({
                     'error': 'No parts could be exported from this document',
                     'message': empty_message,
-                    'debug': debug
+                    'debug': debug,
                 }), 500
 
             dxf_files_inline = []
