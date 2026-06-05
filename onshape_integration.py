@@ -56,7 +56,6 @@ class OnshapeClient:
         self.token_expires = None
         self._auth_mode_logged = False
         self.last_onshape_api_error = None
-        self.last_api_limit_error = None
     
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
@@ -274,28 +273,6 @@ class OnshapeClient:
             if not self.refresh_access_token():
                 raise ValueError("Token expired and refresh failed")
     
-    def _record_onshape_response(self, method, endpoint, response):
-        """Capture safe diagnostics for the last Onshape API response."""
-        try:
-            status_code = getattr(response, 'status_code', None)
-            preview = getattr(response, 'text', '') or ''
-            debug = {
-                'auth_mode': 'api_key' if self.has_api_key_auth() else 'oauth',
-                'method': method,
-                'endpoint': endpoint,
-                'status_code': status_code,
-                'content_type': response.headers.get('content-type', '') if hasattr(response, 'headers') else '',
-                'response_preview': preview[:1000],
-            }
-            if status_code and status_code >= 400:
-                self.last_onshape_api_error = debug
-                if status_code in (402, 429):
-                    self.last_api_limit_error = debug
-            elif status_code and status_code < 400:
-                self.last_onshape_api_error = None
-        except Exception as exc:
-            log(f"Could not record Onshape response diagnostics: {exc}")
-
     def _make_api_request(self, method, endpoint, **kwargs):
         """
         Make an authenticated API request to Onshape.
@@ -331,6 +308,27 @@ class OnshapeClient:
         self._record_onshape_response(method, endpoint, response)
         return response
     
+    def _record_onshape_response(self, method, endpoint, response):
+        """Store the last failing Onshape API response for safe UI diagnostics."""
+        if 200 <= getattr(response, 'status_code', 0) < 300:
+            self.last_onshape_api_error = None
+            return
+
+        preview = ''
+        try:
+            preview = response.text[:800]
+        except Exception:
+            preview = '<response text unavailable>'
+
+        self.last_onshape_api_error = {
+            'auth_mode': 'api_key' if self.has_api_key_auth() else 'oauth',
+            'method': method,
+            'endpoint': endpoint,
+            'status_code': getattr(response, 'status_code', None),
+            'content_type': response.headers.get('Content-Type') if hasattr(response, 'headers') else None,
+            'response_preview': preview,
+        }
+
     def get_user_info(self):
         """Get information about the authenticated user"""
         try:
@@ -534,9 +532,18 @@ class OnshapeClient:
         # /exportinternal call is an internal web-client endpoint and can return
         # misleading 402 responses even when the normal Developer API counter is
         # not exhausted.
-        log("\n[Method 1] Trying public Part Studio translations API with selected ID...")
+        log("\n[Method 1] Trying public Part Studio translations API with selected part/body ID...")
+        # The public translations API's partIds field expects visible part/body IDs,
+        # not topology face IDs like JPK/JjG. Passing a face ID produces
+        # "No visible parts to export". When we already resolved the selected
+        # face back to its owning body, export that body here.
+        selected_export_id = body_id or face_id
+        if body_id:
+            log(f"Using resolved body_id for public DXF translation: {selected_export_id}")
+        else:
+            log(f"No body_id supplied; falling back to selected face_id: {selected_export_id}")
         selected_result = self.export_dxf_async(
-            document_id, workspace_id, element_id, part_ids=[face_id]
+            document_id, workspace_id, element_id, part_ids=[selected_export_id]
         )
         if selected_result:
             return selected_result
