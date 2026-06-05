@@ -1,4 +1,4 @@
-x`#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 BionicsCam - FRC Team 4909 CAM Tool
 A Flask-based web interface for generating G-code from DXF files
@@ -464,6 +464,33 @@ def get_onshape_client_or_401():
         }), 401
 
     return client, None, None
+
+
+def get_onshape_picker_client():
+    """
+    Return the current user's OAuth-backed Onshape client for the browser picker.
+
+    The picker is intentionally OAuth-only. It must send the user to Onshape to
+    authorize/select from their own account instead of silently falling back to
+    server-wide API keys. Existing non-picker code can still use API-key auth
+    where it already did before.
+    """
+    return session_manager.get_client(get_current_user_id())
+
+
+def get_onshape_auth_config_error():
+    """Return a human-readable OAuth setup error, or None if OAuth can start."""
+    try:
+        client = get_onshape_client()
+        if not client.config.get('client_id'):
+            return 'Onshape OAuth is missing ONSHAPE_CLIENT_ID.'
+        if not client.config.get('client_secret'):
+            return 'Onshape OAuth is missing ONSHAPE_CLIENT_SECRET. Add it in your environment before using the Onshape picker.'
+        if not client.config.get('redirect_uri'):
+            return 'Onshape OAuth is missing a redirect URI. Set BASE_URL so the callback becomes BASE_URL/onshape/oauth/callback.'
+        return None
+    except Exception as e:
+        return f'Could not read Onshape OAuth configuration: {e}'
 
 def extract_onshape_params(params):
     """Extract Onshape parameters from request params dict"""
@@ -1364,9 +1391,16 @@ def onshape_launch():
     if not ONSHAPE_AVAILABLE:
         return jsonify({'error': 'Onshape integration not available'}), 400
 
-    client = session_manager.get_client(get_current_user_id())
+    client = get_onshape_picker_client()
     if client:
         return redirect('/onshape/picker')
+
+    auth_error = get_onshape_auth_config_error()
+    if auth_error:
+        return render_onshape_picker(
+            step='document',
+            error_message=auth_error
+        ), 400
 
     session['post_onshape_auth_redirect'] = '/onshape/picker'
     return redirect('/onshape/auth?next=/onshape/picker')
@@ -1386,8 +1420,14 @@ def onshape_picker():
     if not ONSHAPE_AVAILABLE:
         return jsonify({'error': 'Onshape integration not available'}), 400
 
-    client = session_manager.get_client(get_current_user_id())
+    client = get_onshape_picker_client()
     if not client:
+        auth_error = get_onshape_auth_config_error()
+        if auth_error:
+            return render_onshape_picker(
+                step='document',
+                error_message=auth_error
+            ), 400
         session['post_onshape_auth_redirect'] = '/onshape/picker'
         return redirect('/onshape/auth?next=/onshape/picker')
 
@@ -1482,6 +1522,13 @@ def onshape_auth():
         }), 400
 
     try:
+        auth_error = get_onshape_auth_config_error()
+        if auth_error:
+            return render_onshape_picker(
+                step='document',
+                error_message=auth_error
+            ), 400
+
         client = get_onshape_client()
 
         # Generate state for CSRF protection
@@ -1552,27 +1599,34 @@ def onshape_oauth_callback():
         # Check if there's a pending import (came from Onshape extension)
         pending_import = session.get('pending_onshape_import')
 
-        # Only load config during auth if NOT coming from Onshape extension
-        # (Extension flow will load config during export endpoint)
+        # Only load config during auth if NOT coming from Onshape extension.
+        # The picker must not fail OAuth just because the optional shared team
+        # config document is unavailable, forbidden, or blocked by an Onshape plan.
         if not pending_import:
-            log("ℹ️  Direct authentication (not from Onshape) - loading config now")
-            config_yaml = client.fetch_config_file()
-            if config_yaml:
-                log(f"🔍 DEBUG: Raw YAML length: {len(config_yaml)} bytes")
-                log(f"🔍 DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
-                team_config = TeamConfig.from_yaml(config_yaml)
-                log(f"✅ Team config loaded: {team_config.team_name} (#{team_config.team_number})")
-                log(f"🔍 DEBUG: team_config._data keys: {list(team_config._data.keys())}")
-                log(f"🔍 DEBUG: team_config._data has 'team' key? {'team' in team_config._data}")
-                if 'team' in team_config._data:
-                    log(f"🔍 DEBUG: team_config._data['team'] = {team_config._data['team']}")
-                session['team_config_data'] = team_config._data
-                session['team_config'] = team_config.to_dict()
-                session['team_number'] = team_config.team_number
-                session['team_config_url'] = getattr(client, 'last_config_url', None)
-                session['using_default_config'] = False
-            else:
-                log("⚠️  No team config found - using defaults")
+            log("Direct authentication (not from Onshape extension) - loading config now")
+            try:
+                config_yaml = client.fetch_config_file()
+                if config_yaml:
+                    log(f"DEBUG: Raw YAML length: {len(config_yaml)} bytes")
+                    log(f"DEBUG: First 500 chars of YAML: {config_yaml[:500]}")
+                    team_config = TeamConfig.from_yaml(config_yaml)
+                    log(f"Team config loaded: {team_config.team_name} (#{team_config.team_number})")
+                    session['team_config_data'] = team_config._data
+                    session['team_config'] = team_config.to_dict()
+                    session['team_number'] = team_config.team_number
+                    session['team_config_url'] = getattr(client, 'last_config_url', None)
+                    session['using_default_config'] = False
+                else:
+                    log("No team config found - using defaults")
+                    team_config = TeamConfig()
+                    session['team_config_data'] = {}
+                    session['team_config'] = team_config.to_dict()
+                    session['team_number'] = team_config.team_number
+                    session.pop('team_config_url', None)
+                    session['using_default_config'] = True
+            except Exception as config_error:
+                log(f"Optional team config load failed; continuing with defaults: {config_error}")
+                log(traceback.format_exc())
                 team_config = TeamConfig()
                 session['team_config_data'] = {}
                 session['team_config'] = team_config.to_dict()
@@ -1580,7 +1634,7 @@ def onshape_oauth_callback():
                 session.pop('team_config_url', None)
                 session['using_default_config'] = True
         else:
-            log("ℹ️  Authentication from Onshape extension - will load config during export")
+            log("Authentication from Onshape extension - will load config during export")
 
         log("="*60 + "\n")
 
