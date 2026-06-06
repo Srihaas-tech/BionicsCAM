@@ -1799,59 +1799,209 @@ class OnshapeClient:
             return None
 
 
+    def _normalize_document_rows(self, raw_items):
+        """Normalize Onshape document search/list responses for the picker."""
+        documents = []
+        seen = set()
+
+        for item in raw_items or []:
+            if not isinstance(item, dict):
+                continue
+
+            # /documents/search sometimes wraps the document-like fields inside
+            # searchHits, but the document id/name/defaultWorkspace remain on
+            # the top-level item in the responses we care about. Support both
+            # shapes defensively so one Onshape response variant cannot blank
+            # the picker.
+            doc_id = item.get('id') or item.get('documentId')
+            if not doc_id or doc_id in seen:
+                continue
+            seen.add(doc_id)
+
+            workspace = item.get('defaultWorkspace') or item.get('workspace') or {}
+            workspace_id = (
+                (workspace.get('id') if isinstance(workspace, dict) else None)
+                or item.get('defaultWorkspaceId')
+                or item.get('workspaceId')
+            )
+
+            owner = item.get('owner') or {}
+            owner_name = owner.get('name') if isinstance(owner, dict) else ''
+            if not owner_name:
+                owner_name = item.get('ownerName') or item.get('ownedByName') or 'Unknown owner'
+
+            documents.append({
+                'id': doc_id,
+                'name': item.get('name') or item.get('documentName') or 'Untitled document',
+                'workspace_id': workspace_id,
+                'owner_name': owner_name,
+                'modified_at': item.get('modifiedAt') or item.get('modified_at') or item.get('updatedAt') or '',
+                'href': f"{self.BASE_URL}/documents/{doc_id}" + (f"/w/{workspace_id}" if workspace_id else ''),
+            })
+
+        return documents
+
+    def _extract_document_items(self, payload):
+        """Extract document rows from the response shapes Onshape returns."""
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ('items', 'documents', 'results'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+
+        # Some APIs return one document object directly. Treat it as one row
+        # only when it looks document-like.
+        if payload.get('id') and payload.get('name'):
+            return [payload]
+
+        return []
+
+    def _list_documents_get(self, query, limit, extra_params=None):
+        """Try the classic GET /documents endpoint."""
+        params = {
+            'limit': limit,
+            'sortColumn': 'modifiedAt',
+            'sortOrder': 'desc',
+        }
+        if query:
+            # Onshape deployments have differed on whether this param is q,
+            # filter, or absent. q is accepted by the current code path when
+            # supported, and unsupported params are ignored by Onshape rather
+            # than crashing the picker.
+            params['q'] = query
+        if extra_params:
+            params.update(extra_params)
+
+        response = self._make_api_request('GET', '/documents', params=params)
+        if response.status_code != 200:
+            return [], {
+                'method': 'GET',
+                'endpoint': '/documents',
+                'status': response.status_code,
+                'count': 0,
+                'response': response.text[:500],
+            }
+
+        payload = response.json()
+        items = self._extract_document_items(payload)
+        docs = self._normalize_document_rows(items)
+        return docs, {
+            'method': 'GET',
+            'endpoint': '/documents',
+            'status': response.status_code,
+            'count': len(docs),
+            'params': params,
+        }
+
+    def _list_documents_search(self, query, limit, owner_id=None):
+        """Try POST /documents/search, optionally scoped to one owner/team."""
+        raw_query = query.strip() if query else ''
+        search_body = {
+            'foundIn': 'w',
+            'when': 'latest',
+            'documentFilter': 0,
+            'rawQuery': raw_query,
+            'limit': limit,
+        }
+        if owner_id:
+            search_body['ownerId'] = owner_id
+
+        response = self._make_api_request('POST', '/documents/search', json=search_body)
+        if response.status_code != 200:
+            return [], {
+                'method': 'POST',
+                'endpoint': '/documents/search',
+                'status': response.status_code,
+                'count': 0,
+                'owner_id': owner_id,
+                'response': response.text[:500],
+            }
+
+        payload = response.json()
+        items = self._extract_document_items(payload)
+        docs = self._normalize_document_rows(items)
+        return docs, {
+            'method': 'POST',
+            'endpoint': '/documents/search',
+            'status': response.status_code,
+            'count': len(docs),
+            'owner_id': owner_id,
+        }
+
     def list_documents(self, query='', limit=25):
         """
         List Onshape documents visible to the authenticated user.
 
-        Returns a normalized list of dicts with id, name, workspace_id,
-        owner_name, modified_at, and href. Used by the BionicsCAM import
-        picker. This does not affect the existing Onshape extension flow.
+        This intentionally tries more than one Onshape discovery path. The
+        simple GET /documents endpoint can return zero for team/classroom-owned
+        documents even when the OAuth user can see them in Onshape. The picker
+        should not interpret that as "no documents" until owner-scoped search
+        has also been tried.
         """
         try:
-            params = {
-                'limit': limit,
-                'sortColumn': 'modifiedAt',
-                'sortOrder': 'desc',
-            }
-            if query:
-                params['q'] = query
+            query = (query or '').strip()
+            cache_key = query or '__recent__'
+            cached = self._picker_cache_get('document_list', cache_key, limit)
+            if cached is not None:
+                return cached
 
-            response = self._make_api_request('GET', '/documents', params=params)
-            if response.status_code != 200:
-                log(f"Failed to list documents: HTTP {response.status_code}")
-                log(f"Response: {response.text[:500]}")
-                return []
+            diagnostics = []
+            by_id = {}
 
-            payload = response.json()
-            raw_items = payload.get('items') if isinstance(payload, dict) else payload
-            if raw_items is None:
-                raw_items = payload.get('documents', []) if isinstance(payload, dict) else []
+            def add_docs(docs):
+                for doc in docs or []:
+                    doc_id = doc.get('id')
+                    if doc_id and doc_id not in by_id:
+                        by_id[doc_id] = doc
 
-            documents = []
-            for item in raw_items or []:
-                doc_id = item.get('id') or item.get('documentId')
-                if not doc_id:
+            # 1) Fast path. This is one request and works for many personal
+            # accounts, so keep it first.
+            docs, diag = self._list_documents_get(query, limit)
+            diagnostics.append(diag)
+            add_docs(docs)
+
+            # 2) Search endpoint. This is what reliably finds team/company docs
+            # in many Onshape accounts.
+            if len(by_id) < min(limit, 5) or query:
+                docs, diag = self._list_documents_search(query, limit)
+                diagnostics.append(diag)
+                add_docs(docs)
+
+            # 3) Owner-scoped search for user companies/teams. This fixes the
+            # regression where the picker says zero docs even though the same
+            # OAuth user can see team documents.
+            companies = self.get_companies() or []
+            for company in companies:
+                if len(by_id) >= limit and not query:
+                    break
+                owner_id = company.get('id')
+                if not owner_id:
                     continue
+                docs, diag = self._list_documents_search(query, limit, owner_id=owner_id)
+                diagnostics.append(diag)
+                add_docs(docs)
 
-                workspace = item.get('defaultWorkspace') or item.get('workspace') or {}
-                workspace_id = workspace.get('id') or item.get('defaultWorkspaceId') or item.get('workspaceId')
+            documents = list(by_id.values())[:limit]
+            documents.sort(key=lambda d: d.get('modified_at') or '', reverse=True)
 
-                owner = item.get('owner') or {}
-                owner_name = owner.get('name') if isinstance(owner, dict) else ''
+            self.last_document_search_diagnostics = diagnostics
+            log(f"Onshape picker document discovery returned {len(documents)} document(s)")
+            for diag in diagnostics:
+                log(f"   {diag.get('method')} {diag.get('endpoint')} status={diag.get('status')} count={diag.get('count')} owner={diag.get('owner_id', '')}")
 
-                documents.append({
-                    'id': doc_id,
-                    'name': item.get('name') or 'Untitled document',
-                    'workspace_id': workspace_id,
-                    'owner_name': owner_name or 'Unknown owner',
-                    'modified_at': item.get('modifiedAt') or item.get('modified_at') or '',
-                    'href': f"{self.BASE_URL}/documents/{doc_id}" + (f"/w/{workspace_id}" if workspace_id else ''),
-                })
-
-            return documents
+            return self._picker_cache_set('document_list', documents, cache_key, limit)
         except Exception as e:
             log(f"Error listing documents: {e}")
             log(traceback.format_exc())
+            self.last_document_search_diagnostics = [{
+                'error': str(e),
+                'status': 'exception',
+                'count': 0,
+            }]
             return []
 
     def _get_workspace_elements_cached(self, document_id, workspace_id):
