@@ -2306,7 +2306,11 @@ def onshape_import():
                 log("⚠️  Could not find reference origin, using default")
                 reference_origin = {'x': 0, 'y': 0, 'z': 0}
 
-            # Export multi-layer DXF
+            # Export multi-layer DXF. If the selected-face 2.5D export fails,
+            # fall back to a plain 2D face/body DXF instead of hard-failing.
+            # This keeps the Onshape picker useful for the first milestone
+            # (single part -> single face import), while preserving the 2.5D
+            # path for parts where it works.
             result = client.export_multilayer_dxf(
                 document_id, workspace_id, element_id,
                 face_id, export_body_id, face_normal, reference_origin,
@@ -2318,6 +2322,13 @@ def onshape_import():
             else:
                 # Backwards compatibility if export function doesn't return thickness
                 dxf_content = result
+                detected_thickness = None
+
+            if not dxf_content and face_id:
+                log("⚠️  Multi-layer export failed; falling back to single-layer selected face/body DXF")
+                dxf_content = client.export_face_to_dxf(
+                    document_id, workspace_id, element_id, face_id, export_body_id, face_normal
+                )
                 detected_thickness = None
         else:
             log("📄 Single-layer export")
@@ -2341,7 +2352,10 @@ def onshape_import():
                     'face_id': face_id,
                     'body_id': export_body_id,
                     'document_id': document_id,
-                    'element_id': element_id
+                    'workspace_id': workspace_id,
+                    'element_id': element_id,
+                    'multilayer_requested': multilayer,
+                    'last_onshape_export_error': getattr(client, 'last_onshape_export_error', None),
                 }
             }), 500
         
