@@ -380,7 +380,7 @@ When BionicsCAM first started working, it was tested by a teammate, Declan Murph
 
 Very helpful. Very polite. Completely useless.
 
-After several hours of debugging, the Vercel logs finally revealed the real problem. At one point, the useful error looked like this:
+Anyways, I spent about 3 hours of my own time tryna debug it, to no avail. I asked Claude, it did nothing to help. I asked ChangGPT (Deepseek), still nada. I asked ChatGPT, nope. I gave up, accepted damnation, and looked at the Vercel logs. It looked like this:
 
 ```json
 {
@@ -395,7 +395,7 @@ After several hours of debugging, the Vercel logs finally revealed the real prob
 
 Much clearer.
 
-Raccoons ARE NOT my favorite animal. A lil backstory: when I actually finished making BionicsCAM, I gave it to one of my teammates, Declan Murphy (O'Harris(Idk which one it is)) he came back with a very generic error, someting along the lines of "I see the parts, but I don't want to export". I, ofc was raging at that. Manual DXF export was working. It was only the Onshape thingamabobber. Anyways, I spent about 3 hours of my own time tryna debug it, to no avail. I asked Claude, it did nothing to help. I asked ChangGPT (Deepseek), still nada. I asked ChatGPT, nope. I gave up, accepted damnation, and looked at the Vercel logs. I immediately understood what happened and I pasted the logs to GPT-man. It was like "OH. We finally caught the raccoon on camera." That immediately became a metaphor for us. Since then, “raccoon” has been the official term for any bug, weird API behavior, preview overlay zombie, or mysterious CNC gremlin.
+I immediately understood what happened and I pasted the logs to GPT-man. It was like "OH. We finally caught the raccoon on camera." That immediately became a metaphor for us. Since then, “raccoon” has been the official term for any bug, weird API behavior, preview overlay zombie, or mysterious CNC gremlin.
 
 ---
 
