@@ -590,6 +590,7 @@ def render_onshape_picker(**context):
     context.setdefault('selected_document', None)
     context.setdefault('selected_part_studio', None)
     context.setdefault('error_message', None)
+    context.setdefault('diagnostics', None)
     context.setdefault('onshape_connected', session.get('onshape_authenticated', False))
     return render_template('onshape_picker.html', **context)
 
@@ -1441,6 +1442,7 @@ def onshape_picker():
                 step='document',
                 query=query,
                 documents=documents,
+                diagnostics=getattr(client, 'last_document_search_diagnostics', None),
                 error_message=None if documents else 'No Onshape documents were returned. Try searching by name or check account access.'
             )
 
