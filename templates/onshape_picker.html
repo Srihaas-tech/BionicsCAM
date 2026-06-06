@@ -70,6 +70,14 @@
         <div class="picker-alert">{{ error_message }}</div>
         {% endif %}
 
+
+        {% if diagnostics %}
+        <details class="picker-card" style="margin-bottom:1rem;">
+            <summary class="panel-code" style="cursor:pointer;">Show Onshape document-list diagnostics</summary>
+            <pre style="white-space:pre-wrap; overflow:auto; color:var(--ink-soft); font-family:'DM Mono', monospace; font-size:.78rem; margin-top:1rem;">{{ diagnostics|tojson(indent=2) }}</pre>
+        </details>
+        {% endif %}
+
         {% if step == 'document' %}
         <section class="picker-card">
             <div class="panel-code">01 / Select document</div>
