@@ -1436,7 +1436,7 @@ def onshape_picker():
     try:
         # Step 1: document list/search
         if not document_id:
-            documents = client.list_documents(query=query, limit=30)
+            documents = client.list_documents(query=query, limit=20)
             session_manager.update_session_tokens(client)
             return render_onshape_picker(
                 step='document',
