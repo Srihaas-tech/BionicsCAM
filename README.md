@@ -6,7 +6,10 @@ BionicsCAM is a browser-based CNC workflow for flat FRC parts. It can import DXF
 
 It started as a fork/rebrand of **PenguinCAM by FRC Team 6238**, then wandered into the trash can and came back with Onshape integration, auto-nesting, Vercel deployment, and a suspicious number of raccoon jokes.
 
-Live app: <https://bionicscam.vercel.app>
+**Live app:** <https://bionicscam.vercel.app>
+
+🔗 **Demo video:**  
+[![Demo video](https://img.youtube.com/vi/gFReFDz-_LI/0.jpg)](https://youtu.be/zPZCTVh2n2Q)
 
 ---
 
@@ -37,6 +40,14 @@ The raccoon philosophy:
 
 > Make the safe path easy, make the dangerous path obvious, and never let the overlay raccoon back into the G-code preview.
 
+### Origin story
+
+First thing's first: huge thanks to **FRC Team 6238, Popcorn Penguins**, for PenguinCAM.
+
+BionicsCAM started late at night when our team needed a part immediately and the hosted PenguinCAM instance was unavailable. We got a local version running, then the project spiraled into a Vercel-hosted app with Onshape integration, auto-nesting, and enough debugging chaos to accidentally create a raccoon-themed engineering religion.
+
+The goal is simple: make it easier for the whole team to go from CAD to router-ready G-code without forcing every student to become a CAM expert on day one.
+
 ---
 
 ## Features
@@ -54,49 +65,20 @@ The raccoon philosophy:
 - Single DXF upload.
 - Multi-DXF upload.
 - Quantity support for multi-upload.
-- Works even when Onshape API raccoon is having a day.
+- Works even when the Onshape API raccoon is having a day.
+
+### Built for FRC
+
+- Automatic hole detection.
+- Circular holes are preserved from CAD geometry.
+- Supports common screw holes, bearing holes, and custom sizes.
+- Helical entry and spiral clearing where applicable.
+- Smart perimeter cutting for flat plates.
+- Designed for student-friendly workflow, not enterprise CAM wizardry.
 
 ### Auto-nesting
 
-- Places multiple parts onto stock.#BionicsCAM
-
-**Onshape-to-CNC for FRC Teams**
-
-First thing's first, I want to thank Team 6238 and give a lil backstory. It was really late, and we need a part made immediately. The bad news was that Railway, the site that hosted PenguinCAM was down. We immediately asked Claude (the best Coding AI out there how to host our own version of PenguinCAM. We ended up making a local host. So I, Srihaas Mynampati got obsessed with making BionicsCAM. It took 3 days, multiple energy bars, and hundreds of AI prompts to make it. BionicsCAM was on Vercel! I wasn't done yet. I wanted to add implementation to Onshape. This took 2 days, more energy bars (I had to take a break to go to Costco to get more), and hundreds of MORE AI prompts. (ChatGPT started to get pissed off). And now I'm done. But not in the way you think. I still have to make this for my entire team. I also want to add a few features to BionicsCAM to make it BETTER than it's SisterCAM.
-
-🔗 **Demo video:**  
-[![Demo video](https://img.youtube.com/vi/gFReFDz-_LI/0.jpg)](https://youtu.be/zPZCTVh2n2Q)
-
-**Live app:** https://bionicscam.vercel.app
----
-
-## What is BionicsCAM?
-
-BionicsCAM streamlines the workflow from CAD design to CNC machining for FRC teams:
-1. **Design in Onshape** → Create flat plates or tubes, with holes and pockets
-2. **Open app → "Send to BionicsCAM"** → One-click export from Onshape
-3. **Orient & Generate** → Rotate part, auto-generate toolpaths
-4. **Download or Save to Drive** → Ready to run on your CNC router
-
-**No difficult CAM software, no manual exports!** BionicsCAM knows what FRC teams need.
-
-Designed to feel like 3D printer slicers or laser cutter software. Get the design, orient it on the machine, and go. Launching directly from Onshape means no export/import steps, lost files or inconsistent naming. Every part designed by your team members automatically get the same CNC behavior. Students don't have to know feeds & speeds, understand ramp angles, risk machine collisions. Just select the part and go.
-
-**Multi-team support:** Other teams can use the hosted service at https://bionicscam.vercel.app! Just upload a `PenguinCAM-config.yaml` file to your Onshape documents to customize settings for your CNC machine. See "For Other FRC Teams" below.
-
----
-
-## Features
-
-### 🤖 **Built for FRC**
-
-✅ **Automatic hole detection:**
-- All circular holes (preserves exact CAD dimensions)
-- #10 screw holes, bearing holes, or custom sizes
-- Helical entry + spiral clearing strategy
-
-✅ **Smart perimeter cutting of plates:**
-
+- Places multiple parts onto stock.
 - Uses simple, reliable rectangular packing.
 - Supports quantity expansion.
 - Adds clearance between parts.
@@ -353,7 +335,7 @@ BionicsCAM is based on **PenguinCAM by FRC Team 6238, Popcorn Penguins**.
 
 Huge thank-you to Team 6238 for releasing PenguinCAM under the MIT License. BionicsCAM/RaccoonCAM would not exist without that foundation.
 
-Additional BionicsCAM work by Srihaas Mynampati, Chris Johnson, and the Big Man Himeself, Blake Borque, with extensive assistance from **Ahem** AI tools and at least one metaphorical raccoon.
+Additional BionicsCAM work by Srihaas Mynampati, Chris Johnson, and the Big Man Himself, Blake Borque, with extensive assistance from **ahem** AI tools and at least one metaphorical raccoon.
 
 ---
 
@@ -383,6 +365,40 @@ If publishing publicly, be clear that RaccoonCAM/BionicsCAM is a modified fork a
 
 ---
 
+## What's With All The Raccoons?
+
+Raccoons **are not** my favorite animal. This started as a debugging joke.
+
+When BionicsCAM first started working, it was tested by a teammate, Declan Murphy. Manual DXF upload worked, but the Onshape import path returned a painfully vague error:
+
+```json
+{
+  "error": "No parts could be exported from this document",
+  "message": "BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part."
+}
+```
+
+Very helpful. Very polite. Completely useless.
+
+After several hours of debugging, the Vercel logs finally revealed the real problem. At one point, the useful error looked like this:
+
+```json
+{
+  "content_type": "application/json",
+  "face_id": "JPK",
+  "response_preview": "{\n \"message\" : \"API limit exceeded\",\n \"moreInfoUrl\" : \"\",\n \"status\" : 402,\n \"code\" : 402\n}",
+  "route": "workspace",
+  "selector_key": "faceIds",
+  "status_code": 402
+}
+```
+
+Much clearer.
+
+Raccoons ARE NOT my favorite animal. A lil backstory: when I actually finished making BionicsCAM, I gave it to one of my teammates, Declan Murphy (O'Harris(Idk which one it is)) he came back with a very generic error, someting along the lines of "I see the parts, but I don't want to export". I, ofc was raging at that. Manual DXF export was working. It was only the Onshape thingamabobber. Anyways, I spent about 3 hours of my own time tryna debug it, to no avail. I asked Claude, it did nothing to help. I asked ChangGPT (Deepseek), still nada. I asked ChatGPT, nope. I gave up, accepted damnation, and looked at the Vercel logs. I immediately understood what happened and I pasted the logs to GPT-man. It was like "OH. We finally caught the raccoon on camera." That immediately became a metaphor for us. Since then, “raccoon” has been the official term for any bug, weird API behavior, preview overlay zombie, or mysterious CNC gremlin.
+
+---
+
 ## Final Warning
 
 CNC routers are real machines. They do not care that the preview looked cute.
@@ -390,26 +406,3 @@ CNC routers are real machines. They do not care that the preview looked cute.
 Always verify toolpaths, clamp material, set zeros correctly, and keep hands away from the danger zone.
 
 If something looks wrong, stop. The raccoon can wait.
-
-## What's With All The Raccoons?
-Raccoons **ARE NOT**  my favorite animal. A lil backstory: when I actually finished making BionicsCAM, I gave it to one of my teammates, Declan Murphy (O'Harris(Idk which one it is)) he came back with a very generic error, someting along the lines of "I see the parts, but I don't want to export". I, ofc was raging at that. Manual DXF export was working. It was only the Onshape thingamabobber. Anyways, I spent about 3 hours of my own time tryna debug it, to no avail. I asked Claude, it did nothing to help. I asked ChangGPT (Deepseek), still nada. I asked ChatGPT, nope. I gave up, accepted damnation, and looked at the Vercel logs. I immediately understood what happened and I pasted the logs to GPT-man. It was like "OH. We finally caught the raccoon on camera." That immediately became a metaphor for us, and we've been using raccoon as a metaphor whenever something goes wrong, or right...
-
-Here is the exact error that was pissing me off:
-
-{
-"error":
-"No parts could be exported from this document","message":"BionicsCAM could not resolve/export the selected Onshape faces. Try selecting one large flat face per part."
-}
-
-*You see? Very vague. That's what I was wrestling with for 4 hours of my life*
-
-The error that finally made sense:
-         {
-            "content_type":"application/json",
-            "face_id":"JPK",
-            "response_preview":"{\n \"message\" : \"API limit exceeded\",\n \"moreInfoUrl\" : \"\",\n \"status\" : 402,\n \"code\" : 402\n}",
-            "route":"workspace",
-            "selector_key":"faceIds",
-            "status_code":402
-   },
-*Much clearer.* 
