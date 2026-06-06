@@ -63,6 +63,7 @@ class OnshapeClient:
         self.access_token = None
         self.refresh_token = None
         self.token_expires = None
+        self.last_onshape_export_error = None
 
     def _picker_cache_user_key(self):
         """Return a non-sensitive cache namespace for the current auth context."""
@@ -556,12 +557,26 @@ class OnshapeClient:
         # /exportinternal call is an internal web-client endpoint and can return
         # misleading 402 responses even when the normal Developer API counter is
         # not exhausted.
-        log("\n[Method 1] Trying public Part Studio translations API with selected ID...")
-        selected_result = self.export_dxf_async(
-            document_id, workspace_id, element_id, part_ids=[face_id]
-        )
-        if selected_result:
-            return selected_result
+        log("\n[Method 1] Trying public Part Studio translations API with selected body/face ID...")
+        # Onshape public Part Studio translations expect body/part IDs in
+        # partIds. Face IDs can work in some contexts but often fail with
+        # `No visible parts to export`. Prefer the selected body/part ID when
+        # available, then fall back to the face ID for backwards compatibility.
+        candidate_ids = []
+        if body_id:
+            candidate_ids.append(str(body_id).strip())
+        if face_id and str(face_id).strip() not in candidate_ids:
+            candidate_ids.append(str(face_id).strip())
+
+        for selected_id in candidate_ids:
+            if not selected_id:
+                continue
+            log(f"Trying public selected DXF translation with partIds={selected_id}")
+            selected_result = self.export_dxf_async(
+                document_id, workspace_id, element_id, part_ids=[selected_id], timeout=90
+            )
+            if selected_result:
+                return selected_result
 
         if os.environ.get('ONSHAPE_ENABLE_EXPORTINTERNAL', '').lower() not in ('1', 'true', 'yes'):
             log("Public selected DXF translation failed; skipping internal export endpoint by default")
@@ -689,6 +704,7 @@ class OnshapeClient:
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/translations"
 
         try:
+            self.last_onshape_export_error = None
             log(f"\nStarting DXF translation for element {element_id}")
             log(f"API endpoint: {self.API_BASE}{endpoint}")
 
@@ -726,6 +742,13 @@ class OnshapeClient:
 
             log(f"Failed to start translation: {response.status_code}")
             log(f"Response: {response.text}")
+            self.last_onshape_export_error = {
+                'phase': 'start_translation',
+                'status_code': response.status_code,
+                'response_text': response.text[:2000],
+                'part_ids': part_ids_value if 'part_ids_value' in locals() else None,
+                'endpoint': endpoint,
+            }
             return None
 
         except Exception as e:
@@ -828,16 +851,33 @@ class OnshapeClient:
                     log("Translation done but no result data ID found")
                     return None
                     
-            elif state in ['FAILED', 'ACTIVE']:
+            elif state in ['FAILED', 'DONE_WITH_ERRORS']:
                 log(f"Translation failed with state: {state}")
                 failure_reason = status.get('failureReason', 'Unknown')
                 log(f"Failure reason: {failure_reason}")
+                self.last_onshape_export_error = {
+                    'phase': 'poll_translation',
+                    'state': state,
+                    'failure_reason': failure_reason,
+                    'translation_id': translation_id,
+                    'status': status,
+                }
                 return None
-            
+            elif state in ['ACTIVE', 'PENDING', 'IN_PROGRESS', 'REQUESTED', 'UNKNOWN']:
+                log(f"Translation still processing with state: {state}")
+            else:
+                log(f"Translation returned unrecognized state: {state}; continuing to poll")
+
             # Still processing, wait a bit
             time.sleep(2)
         
         log(f"Translation timed out after {timeout} seconds")
+        self.last_onshape_export_error = {
+            'phase': 'poll_translation',
+            'state': 'TIMEOUT',
+            'translation_id': translation_id,
+            'timeout_seconds': timeout,
+        }
         return None
     
     def list_faces(self, document_id, workspace_id, element_id):
