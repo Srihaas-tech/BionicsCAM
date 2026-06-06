@@ -1862,6 +1862,7 @@ class OnshapeClient:
 
     def _list_documents_get(self, query, limit, extra_params=None):
         """Try the classic GET /documents endpoint."""
+        limit = max(1, min(int(limit or 20), 20))
         params = {
             'limit': limit,
             'sortColumn': 'modifiedAt',
@@ -1899,6 +1900,7 @@ class OnshapeClient:
 
     def _list_documents_search(self, query, limit, owner_id=None):
         """Try POST /documents/search, optionally scoped to one owner/team."""
+        limit = max(1, min(int(limit or 20), 20))
         raw_query = query.strip() if query else ''
         search_body = {
             'foundIn': 'w',
@@ -1932,7 +1934,7 @@ class OnshapeClient:
             'owner_id': owner_id,
         }
 
-    def list_documents(self, query='', limit=25):
+    def list_documents(self, query='', limit=20):
         """
         List Onshape documents visible to the authenticated user.
 
@@ -1944,6 +1946,13 @@ class OnshapeClient:
         """
         try:
             query = (query or '').strip()
+            # Onshape rejects GET /documents when limit is above 20. Keep this
+            # cap here so callers cannot accidentally break document discovery.
+            try:
+                limit = int(limit or 20)
+            except (TypeError, ValueError):
+                limit = 20
+            limit = max(1, min(limit, 20))
             cache_key = query or '__recent__'
             cached = self._picker_cache_get('document_list', cache_key, limit)
             if cached is not None:
