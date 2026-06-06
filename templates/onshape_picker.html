@@ -14,31 +14,22 @@
         .picker-title { font-family: Syne, Inter, sans-serif; font-size: clamp(2.3rem, 7vw, 5.6rem); line-height: .86; margin: .5rem 0 1rem; letter-spacing: -.08em; }
         .picker-steps { display: grid; gap: .65rem; }
         .picker-step { display: flex; justify-content: space-between; gap: 1rem; border: 1px solid var(--line); border-radius: 18px; padding: .85rem 1rem; color: var(--ink-soft); }
-        .picker-step.is-active { color: var(--ink); border-color: rgba(249, 182, 69, .55); background: rgba(249, 182, 69, .08); }
-        .picker-search { display: flex; gap: .75rem; margin: 1rem 0; }
-        .picker-search input { flex: 1; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.06); color: var(--ink); padding: .9rem 1rem; }
-        .picker-search button, .pick-action-btn { border: 1px solid rgba(249, 182, 69, .42); border-radius: 999px; background: rgba(249, 182, 69, .12); color: var(--gold); padding: .9rem 1rem; font-weight: 800; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
-        .pick-action-btn.secondary { color: var(--ink-soft); border-color: var(--line); background: rgba(255,255,255,.04); }
+        .picker-step.is-active { color: var(--ink); border-color: rgba(249, 182, 69, .45); background: rgba(249, 182, 69, .08); }
+        .picker-search { display: flex; gap: .7rem; margin: 1rem 0; }
+        .picker-search input { flex: 1; }
         .picker-grid { display: grid; gap: .8rem; }
         .pick-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 1rem; text-decoration: none; color: var(--ink); border: 1px solid var(--line); border-radius: 20px; padding: 1rem; background: rgba(255,255,255,.035); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
-        a.pick-row:hover { transform: translateY(-2px); border-color: rgba(249, 182, 69, .55); background: rgba(255,255,255,.07); }
-        .pick-row.is-recommended { border-color: rgba(249, 182, 69, .5); background: rgba(249, 182, 69, .07); }
+        .pick-row:hover { transform: translateY(-2px); border-color: rgba(249, 182, 69, .55); background: rgba(255,255,255,.07); }
         .pick-name { font-weight: 800; font-size: 1.02rem; }
-        .pick-meta { color: var(--ink-soft); font-size: .86rem; margin-top: .25rem; display: block; }
+        .pick-meta { color: var(--ink-soft); font-size: .86rem; margin-top: .25rem; }
         .pick-action { font-family: 'DM Mono', monospace; font-size: .76rem; text-transform: uppercase; letter-spacing: .08em; color: var(--gold); white-space: nowrap; }
-        .pick-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .55rem; }
-        .face-badge { display: inline-flex; margin-left: .5rem; border: 1px solid rgba(249, 182, 69, .38); border-radius: 999px; padding: .2rem .45rem; color: var(--gold); font-family: 'DM Mono', monospace; font-size: .68rem; letter-spacing: .05em; text-transform: uppercase; }
         .crumbs { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; }
         .crumbs a, .crumbs span { border: 1px solid var(--line); border-radius: 999px; padding: .45rem .7rem; color: var(--ink-soft); text-decoration: none; font-size: .82rem; }
         .crumbs span { color: var(--ink); border-color: rgba(249, 182, 69, .35); }
         .picker-alert { border: 1px solid rgba(255, 102, 102, .28); background: rgba(255, 102, 102, .08); border-radius: 18px; padding: .9rem 1rem; color: var(--ink); margin: 1rem 0; }
-        .debug-panel { margin-top: 1rem; border: 1px solid rgba(249, 182, 69, .24); border-radius: 18px; background: rgba(249, 182, 69, .055); overflow: hidden; }
-        .debug-panel summary { cursor: pointer; padding: .85rem 1rem; font-family: 'DM Mono', monospace; font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--gold); }
-        .debug-body { padding: 0 1rem 1rem; color: var(--ink-soft); font-size: .84rem; }
-        .debug-body pre { white-space: pre-wrap; word-break: break-word; border: 1px solid var(--line); border-radius: 14px; padding: .75rem; background: rgba(0,0,0,.22); color: var(--ink); max-height: 320px; overflow: auto; }
         .open-link { color: var(--ink-soft); text-decoration: none; }
         .open-link:hover { color: var(--gold); }
-        @media (max-width: 860px) { .picker-hero { grid-template-columns: 1fr; } .picker-search, .pick-actions { flex-direction: column; align-items: stretch; } .pick-row { grid-template-columns: 1fr; } }
+        @media (max-width: 860px) { .picker-hero { grid-template-columns: 1fr; } .picker-search { flex-direction: column; } .pick-row { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
@@ -60,9 +51,9 @@
     <main class="picker-shell">
         <section class="picker-hero">
             <div class="picker-card">
-                <div class="eyebrow">OAuth single-part import</div>
-                <h1 class="picker-title">Pick the part. Then pick the cut face.</h1>
-                <p class="panel-copy">Choose a document, a Part Studio, one solid body, then the exact planar face to export. This keeps the existing import pipeline intact while removing the risky auto-guess.</p>
+                <div class="eyebrow">Single-part import</div>
+                <h1 class="picker-title">Pick the part before CAM touches it.</h1>
+                <p class="panel-copy">Choose a document, choose a Part Studio, choose one solid body, then choose the exact planar face to export as the 2D CAM source.</p>
             </div>
             <aside class="picker-card">
                 <div class="micro">Flow guard</div>
@@ -70,22 +61,13 @@
                     <div class="picker-step {% if step == 'document' %}is-active{% endif %}"><span>01 Document</span><span>Onshape file</span></div>
                     <div class="picker-step {% if step == 'studio' %}is-active{% endif %}"><span>02 Part Studio</span><span>source tab</span></div>
                     <div class="picker-step {% if step == 'part' %}is-active{% endif %}"><span>03 Part</span><span>one body</span></div>
-                    <div class="picker-step {% if step == 'face' %}is-active{% endif %}"><span>04 Face</span><span>DXF plane</span></div>
+                    <div class="picker-step {% if step == 'face' %}is-active{% endif %}"><span>04 Face</span><span>2D source</span></div>
                 </div>
             </aside>
         </section>
 
         {% if error_message %}
         <div class="picker-alert">{{ error_message }}</div>
-        {% if document_debug %}
-        <details class="debug-panel">
-            <summary>Show Onshape document-list diagnostics</summary>
-            <div class="debug-body">
-                <p>These are safe request labels, status codes, and response previews from the picker. No OAuth tokens are shown.</p>
-                <pre>{{ document_debug | tojson(indent=2) }}</pre>
-            </div>
-        </details>
-        {% endif %}
         {% endif %}
 
         {% if step == 'document' %}
@@ -99,7 +81,7 @@
             <div class="picker-grid">
                 {% for doc in documents %}
                 {% if doc.workspace_id %}
-                <a class="pick-row" href="/onshape/picker?documentId={{ doc.id | urlencode }}&workspaceId={{ doc.workspace_id | urlencode }}">
+                <a class="pick-row" href="/onshape/picker?documentId={{ doc.id }}&workspaceId={{ doc.workspace_id }}">
                     <span>
                         <span class="pick-name">{{ doc.name }}</span>
                         <span class="pick-meta">{{ doc.owner_name }}{% if doc.modified_at %} · modified {{ doc.modified_at }}{% endif %}</span>
@@ -128,10 +110,10 @@
             </div>
             <div class="panel-code">02 / Select Part Studio</div>
             <h2 class="panel-title">Pick the source tab</h2>
-            <p class="panel-copy">Only Part Studio tabs are shown. Assemblies and drawings are skipped because the import/export pipeline expects Part Studio bodies.</p>
+            <p class="panel-copy">Only Part Studio tabs are shown. Assemblies and drawings are skipped because the current import/export pipeline expects Part Studio bodies.</p>
             <div class="picker-grid">
                 {% for studio in part_studios %}
-                <a class="pick-row" href="/onshape/picker?documentId={{ selected_document.id | urlencode }}&workspaceId={{ selected_document.workspace_id | urlencode }}&elementId={{ studio.id | urlencode }}">
+                <a class="pick-row" href="/onshape/picker?documentId={{ selected_document.id }}&workspaceId={{ selected_document.workspace_id }}&elementId={{ studio.id }}">
                     <span>
                         <span class="pick-name">{{ studio.name }}</span>
                         <span class="pick-meta">{{ studio.type }} · <span class="open-link">opens part selection</span></span>
@@ -147,15 +129,15 @@
         <section class="picker-card">
             <div class="crumbs">
                 <a href="/onshape/picker">Documents</a>
-                <a href="/onshape/picker?documentId={{ selected_document.id | urlencode }}&workspaceId={{ selected_document.workspace_id | urlencode }}">{{ selected_document.name }}</a>
+                <a href="/onshape/picker?documentId={{ selected_document.id }}&workspaceId={{ selected_document.workspace_id }}">{{ selected_document.name }}</a>
                 <span>{{ selected_part_studio.name }}</span>
             </div>
             <div class="panel-code">03 / Select one part</div>
             <h2 class="panel-title">Choose the body to manufacture</h2>
-            <p class="panel-copy">This first version imports one part only. After this, choose the flat face that should become the DXF cut plane.</p>
+            <p class="panel-copy">This first version imports one part only. Selecting a body opens the face picker first, so BionicsCAM does not auto-export the wrong face or loop back through the old import path.</p>
             <div class="picker-grid">
                 {% for part in parts %}
-                <a class="pick-row" href="/onshape/picker?documentId={{ selected_document.id | urlencode }}&workspaceId={{ selected_document.workspace_id | urlencode }}&elementId={{ selected_part_studio.id | urlencode }}&bodyId={{ part.body_id | urlencode }}">
+                <a class="pick-row" href="/onshape/picker?documentId={{ selected_document.id|urlencode }}&workspaceId={{ selected_document.workspace_id|urlencode }}&elementId={{ selected_part_studio.id|urlencode }}&bodyId={{ part.body_id|urlencode }}&stage=faces">
                     <span>
                         <span class="pick-name">{{ part.name }}</span>
                         <span class="pick-meta">{{ part.face_count }} faces · {{ part.planar_face_count }} planar faces · body {{ part.body_id }}</span>
@@ -171,29 +153,30 @@
         <section class="picker-card">
             <div class="crumbs">
                 <a href="/onshape/picker">Documents</a>
-                <a href="/onshape/picker?documentId={{ selected_document.id | urlencode }}&workspaceId={{ selected_document.workspace_id | urlencode }}">{{ selected_document.name }}</a>
-                <a href="/onshape/picker?documentId={{ selected_document.id | urlencode }}&workspaceId={{ selected_document.workspace_id | urlencode }}&elementId={{ selected_part_studio.id | urlencode }}">{{ selected_part_studio.name }}</a>
-                <span>{{ selected_part.name }}</span>
+                <a href="/onshape/picker?documentId={{ selected_document.id|urlencode }}&workspaceId={{ selected_document.workspace_id|urlencode }}">{{ selected_document.name }}</a>
+                <a href="/onshape/picker?documentId={{ selected_document.id|urlencode }}&workspaceId={{ selected_document.workspace_id|urlencode }}&elementId={{ selected_part_studio.id|urlencode }}">{{ selected_part_studio.name }}</a>
+                <span>{{ selected_body.name }}</span>
             </div>
-            <div class="panel-code">04 / Select face</div>
-            <h2 class="panel-title">Choose the flat DXF plane</h2>
-            <p class="panel-copy">The largest planar face is marked as recommended. Use <strong>Import 2D face</strong> first; 2.5D can be tested after the single-face DXF path is proven.</p>
+            <div class="panel-code">04 / Select planar face</div>
+            <h2 class="panel-title">Choose the face to export</h2>
+            <p class="panel-copy">Use the largest/recommended flat face for a normal plate-style CAM import. The primary action exports a single 2D face first; the 2.5D option is still available as a secondary test path.</p>
             <div class="picker-grid">
                 {% for face in faces %}
-                <div class="pick-row {% if face.is_recommended %}is-recommended{% endif %}">
+                <div class="pick-row">
                     <span>
-                        <span class="pick-name">Face {{ face.face_id }}{% if face.is_recommended %}<span class="face-badge">recommended</span>{% endif %}</span>
-                        <span class="pick-meta">{{ '%.3f'|format(face.area_in2) }} in² · normal {{ face.normal_label }}</span>
+                        <span class="pick-name">Face {{ face.face_id }}{% if face.is_recommended %} · recommended{% endif %}</span>
+                        <span class="pick-meta">Area {{ '%.6f'|format(face.area) }} · normal {{ face.normal_label }} · body {{ selected_body.body_id }}</span>
                     </span>
-                    <span class="pick-actions">
-                        <a class="pick-action-btn" href="/onshape/import?documentId={{ selected_document.id | urlencode }}&workspaceId={{ selected_document.workspace_id | urlencode }}&elementId={{ selected_part_studio.id | urlencode }}&bodyId={{ selected_part.body_id | urlencode }}&faceId={{ face.face_id | urlencode }}&multilayer=false&fromPicker=true">Import 2D face</a>
-                        <a class="pick-action-btn secondary" href="/onshape/import?documentId={{ selected_document.id | urlencode }}&workspaceId={{ selected_document.workspace_id | urlencode }}&elementId={{ selected_part_studio.id | urlencode }}&bodyId={{ selected_part.body_id | urlencode }}&faceId={{ face.face_id | urlencode }}&multilayer=true&fromPicker=true">Try 2.5D</a>
+                    <span style="display:flex; gap:.5rem; flex-wrap:wrap; justify-content:flex-end;">
+                        <a class="pick-action" href="/onshape/import?documentId={{ selected_document.id|urlencode }}&workspaceId={{ selected_document.workspace_id|urlencode }}&elementId={{ selected_part_studio.id|urlencode }}&bodyId={{ selected_body.body_id|urlencode }}&faceId={{ face.face_id|urlencode }}&multilayer=false">Import 2D face</a>
+                        <a class="pick-action" style="opacity:.68" href="/onshape/import?documentId={{ selected_document.id|urlencode }}&workspaceId={{ selected_document.workspace_id|urlencode }}&elementId={{ selected_part_studio.id|urlencode }}&bodyId={{ selected_body.body_id|urlencode }}&faceId={{ face.face_id|urlencode }}&multilayer=true">Try 2.5D</a>
                     </span>
                 </div>
                 {% endfor %}
             </div>
         </section>
         {% endif %}
+
     </main>
 </body>
 </html>
