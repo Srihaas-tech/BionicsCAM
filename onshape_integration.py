@@ -49,6 +49,14 @@ class OnshapeClient:
     
     BASE_URL = "https://cad.onshape.com"
     API_BASE = "https://cad.onshape.com/api/v13"
+
+    # Lightweight process-local cache for picker metadata. This is intentionally
+    # not stored in Flask session because bodydetails payloads can exceed cookie
+    # limits. On Vercel this cache is per warm function instance, but it still
+    # removes repeated requests during the common document -> part -> face flow.
+    _PICKER_CACHE = {}
+    _PICKER_CACHE_TTL_SECONDS = 180
+    _PICKER_CACHE_MAX_ITEMS = 128
     
     def __init__(self):
         self.config = self._load_config()
@@ -57,6 +65,53 @@ class OnshapeClient:
         self.token_expires = None
         self.last_onshape_export_error = None
         self.last_onshape_export_errors = []
+
+    def _picker_cache_user_key(self):
+        """Return a non-sensitive cache namespace for the current auth context."""
+        try:
+            user_email = session.get('user_email')
+            if user_email:
+                return f"user:{user_email}"
+        except Exception:
+            pass
+
+        if self.access_token:
+            return "token:" + hashlib.sha256(self.access_token.encode('utf-8')).hexdigest()[:16]
+
+        if self.config.get('access_key'):
+            return "api:" + hashlib.sha256(self.config.get('access_key', '').encode('utf-8')).hexdigest()[:16]
+
+        return "anonymous"
+
+    def _picker_cache_key(self, namespace, *parts):
+        return (self._picker_cache_user_key(), namespace) + tuple(str(part) for part in parts if part is not None)
+
+    def _picker_cache_get(self, namespace, *parts):
+        key = self._picker_cache_key(namespace, *parts)
+        cached = self._PICKER_CACHE.get(key)
+        if not cached:
+            return None
+
+        timestamp, value = cached
+        if time.time() - timestamp > self._PICKER_CACHE_TTL_SECONDS:
+            self._PICKER_CACHE.pop(key, None)
+            return None
+
+        log(f"Picker cache hit: {namespace}")
+        return value
+
+    def _picker_cache_set(self, namespace, value, *parts):
+        if value is None:
+            return value
+
+        # Keep the cache small in long-lived local/dev processes.
+        if len(self._PICKER_CACHE) >= self._PICKER_CACHE_MAX_ITEMS:
+            oldest_key = min(self._PICKER_CACHE.items(), key=lambda item: item[1][0])[0]
+            self._PICKER_CACHE.pop(oldest_key, None)
+
+        key = self._picker_cache_key(namespace, *parts)
+        self._PICKER_CACHE[key] = (time.time(), value)
+        return value
     
     def _load_config(self):
         """Load Onshape OAuth configuration, prioritizing environment variables"""
@@ -675,9 +730,9 @@ class OnshapeClient:
         Part Studio translations API.
 
         Args:
-            part_ids: Optional list/string of selected Onshape IDs. For planar
-                face exports, Onshape's DXF translator accepts the selected
-                face/part id through the partIds field.
+            part_ids: Optional list/string of selected Onshape body/part IDs.
+                Do not pass face IDs here; the public translation endpoint
+                expects visible parts/bodies in partIds.
 
         Returns:
             Translation ID if successful, None otherwise
@@ -685,6 +740,7 @@ class OnshapeClient:
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/translations"
 
         try:
+            self.last_onshape_export_error = None
             log(f"\nStarting DXF translation for element {element_id}")
             log(f"API endpoint: {self.API_BASE}{endpoint}")
 
@@ -714,7 +770,7 @@ class OnshapeClient:
 
             log(f"Response status: {response.status_code}")
 
-            if response.status_code in (200, 201):
+            if response.status_code == 200:
                 data = response.json()
                 translation_id = data.get('id')
                 log(f"Translation started! ID: {translation_id}")
@@ -722,13 +778,13 @@ class OnshapeClient:
 
             log(f"Failed to start translation: {response.status_code}")
             log(f"Response: {response.text}")
-            self._record_export_error(
-                phase='start_translation',
-                endpoint=endpoint,
-                part_ids=part_ids_value if part_ids else None,
-                status_code=response.status_code,
-                response_text=response.text[:2000],
-            )
+            self.last_onshape_export_error = {
+                'phase': 'start_translation',
+                'status_code': response.status_code,
+                'response_text': response.text[:2000],
+                'part_ids': part_ids_value if 'part_ids_value' in locals() else None,
+                'endpoint': endpoint,
+            }
             return None
 
         except Exception as e:
@@ -831,26 +887,33 @@ class OnshapeClient:
                     log("Translation done but no result data ID found")
                     return None
                     
-            elif state in ['FAILED', 'CANCELLED', 'CANCELED']:
+            elif state in ['FAILED', 'DONE_WITH_ERRORS']:
                 log(f"Translation failed with state: {state}")
                 failure_reason = status.get('failureReason', 'Unknown')
                 log(f"Failure reason: {failure_reason}")
-                self._record_export_error(
-                    phase='poll_translation',
-                    translation_id=translation_id,
-                    state=state,
-                    failure_reason=failure_reason,
-                    status=status,
-                )
+                self.last_onshape_export_error = {
+                    'phase': 'poll_translation',
+                    'state': state,
+                    'failure_reason': failure_reason,
+                    'translation_id': translation_id,
+                    'status': status,
+                }
                 return None
-
-            elif state in ['ACTIVE', 'PENDING', 'IN_PROGRESS']:
+            elif state in ['ACTIVE', 'PENDING', 'IN_PROGRESS', 'REQUESTED', 'UNKNOWN']:
                 log(f"Translation still processing with state: {state}")
-            
+            else:
+                log(f"Translation returned unrecognized state: {state}; continuing to poll")
+
             # Still processing, wait a bit
             time.sleep(2)
         
         log(f"Translation timed out after {timeout} seconds")
+        self.last_onshape_export_error = {
+            'phase': 'poll_translation',
+            'state': 'TIMEOUT',
+            'translation_id': translation_id,
+            'timeout_seconds': timeout,
+        }
         return None
     
     def list_faces(self, document_id, workspace_id, element_id):
@@ -863,6 +926,10 @@ class OnshapeClient:
         endpoint = f"/partstudios/d/{document_id}/w/{workspace_id}/e/{element_id}/bodydetails"
 
         try:
+            cached = self._picker_cache_get('bodydetails_include_faces', document_id, workspace_id, element_id)
+            if cached is not None:
+                return cached
+
             log(f"\n{'='*70}")
             log(f"ONSHAPE API: Getting body details")
             log(f"{'='*70}")
@@ -920,7 +987,13 @@ class OnshapeClient:
                     log(f"   Available keys: {list(data.keys())}")
 
                 log(f"{'='*70}\n")
-                return data
+                return self._picker_cache_set(
+                    'bodydetails_include_faces',
+                    data,
+                    document_id,
+                    workspace_id,
+                    element_id
+                )
             else:
                 log(f"\n❌ API call failed: HTTP {response.status_code}")
                 log(f"Response body: {response.text[:500]}")
@@ -1801,14 +1874,301 @@ class OnshapeClient:
             log(f"Error exporting faces: {e}")
             return None
 
-    def get_document_info(self, document_id):
-        """Get information about a document"""
+
+    def _normalize_document_rows(self, raw_items):
+        """Normalize Onshape document search/list responses for the picker."""
+        documents = []
+        seen = set()
+
+        for item in raw_items or []:
+            if not isinstance(item, dict):
+                continue
+
+            # /documents/search sometimes wraps the document-like fields inside
+            # searchHits, but the document id/name/defaultWorkspace remain on
+            # the top-level item in the responses we care about. Support both
+            # shapes defensively so one Onshape response variant cannot blank
+            # the picker.
+            doc_id = item.get('id') or item.get('documentId')
+            if not doc_id or doc_id in seen:
+                continue
+            seen.add(doc_id)
+
+            workspace = item.get('defaultWorkspace') or item.get('workspace') or {}
+            workspace_id = (
+                (workspace.get('id') if isinstance(workspace, dict) else None)
+                or item.get('defaultWorkspaceId')
+                or item.get('workspaceId')
+            )
+
+            owner = item.get('owner') or {}
+            owner_name = owner.get('name') if isinstance(owner, dict) else ''
+            if not owner_name:
+                owner_name = item.get('ownerName') or item.get('ownedByName') or 'Unknown owner'
+
+            documents.append({
+                'id': doc_id,
+                'name': item.get('name') or item.get('documentName') or 'Untitled document',
+                'workspace_id': workspace_id,
+                'owner_name': owner_name,
+                'modified_at': item.get('modifiedAt') or item.get('modified_at') or item.get('updatedAt') or '',
+                'href': f"{self.BASE_URL}/documents/{doc_id}" + (f"/w/{workspace_id}" if workspace_id else ''),
+            })
+
+        return documents
+
+    def _extract_document_items(self, payload):
+        """Extract document rows from the response shapes Onshape returns."""
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ('items', 'documents', 'results'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+
+        # Some APIs return one document object directly. Treat it as one row
+        # only when it looks document-like.
+        if payload.get('id') and payload.get('name'):
+            return [payload]
+
+        return []
+
+    def _list_documents_get(self, query, limit, extra_params=None):
+        """Try the classic GET /documents endpoint."""
+        limit = max(1, min(int(limit or 20), 20))
+        params = {
+            'limit': limit,
+            'sortColumn': 'modifiedAt',
+            'sortOrder': 'desc',
+        }
+        if query:
+            # Onshape deployments have differed on whether this param is q,
+            # filter, or absent. q is accepted by the current code path when
+            # supported, and unsupported params are ignored by Onshape rather
+            # than crashing the picker.
+            params['q'] = query
+        if extra_params:
+            params.update(extra_params)
+
+        response = self._make_api_request('GET', '/documents', params=params)
+        if response.status_code != 200:
+            return [], {
+                'method': 'GET',
+                'endpoint': '/documents',
+                'status': response.status_code,
+                'count': 0,
+                'response': response.text[:500],
+            }
+
+        payload = response.json()
+        items = self._extract_document_items(payload)
+        docs = self._normalize_document_rows(items)
+        return docs, {
+            'method': 'GET',
+            'endpoint': '/documents',
+            'status': response.status_code,
+            'count': len(docs),
+            'params': params,
+        }
+
+    def _list_documents_search(self, query, limit, owner_id=None):
+        """Try POST /documents/search, optionally scoped to one owner/team."""
+        limit = max(1, min(int(limit or 20), 20))
+        raw_query = query.strip() if query else ''
+        search_body = {
+            'foundIn': 'w',
+            'when': 'latest',
+            'documentFilter': 0,
+            'rawQuery': raw_query,
+            'limit': limit,
+        }
+        if owner_id:
+            search_body['ownerId'] = owner_id
+
+        response = self._make_api_request('POST', '/documents/search', json=search_body)
+        if response.status_code != 200:
+            return [], {
+                'method': 'POST',
+                'endpoint': '/documents/search',
+                'status': response.status_code,
+                'count': 0,
+                'owner_id': owner_id,
+                'response': response.text[:500],
+            }
+
+        payload = response.json()
+        items = self._extract_document_items(payload)
+        docs = self._normalize_document_rows(items)
+        return docs, {
+            'method': 'POST',
+            'endpoint': '/documents/search',
+            'status': response.status_code,
+            'count': len(docs),
+            'owner_id': owner_id,
+        }
+
+    def list_documents(self, query='', limit=20):
+        """
+        List Onshape documents visible to the authenticated user.
+
+        This intentionally tries more than one Onshape discovery path. The
+        simple GET /documents endpoint can return zero for team/classroom-owned
+        documents even when the OAuth user can see them in Onshape. The picker
+        should not interpret that as "no documents" until owner-scoped search
+        has also been tried.
+        """
         try:
+            query = (query or '').strip()
+            # Onshape rejects GET /documents when limit is above 20. Keep this
+            # cap here so callers cannot accidentally break document discovery.
+            try:
+                limit = int(limit or 20)
+            except (TypeError, ValueError):
+                limit = 20
+            limit = max(1, min(limit, 20))
+            cache_key = query or '__recent__'
+            cached = self._picker_cache_get('document_list', cache_key, limit)
+            if cached is not None:
+                return cached
+
+            diagnostics = []
+            by_id = {}
+
+            def add_docs(docs):
+                for doc in docs or []:
+                    doc_id = doc.get('id')
+                    if doc_id and doc_id not in by_id:
+                        by_id[doc_id] = doc
+
+            # 1) Fast path. This is one request and works for many personal
+            # accounts, so keep it first.
+            docs, diag = self._list_documents_get(query, limit)
+            diagnostics.append(diag)
+            add_docs(docs)
+
+            # 2) Search endpoint. This is what reliably finds team/company docs
+            # in many Onshape accounts.
+            if len(by_id) < min(limit, 5) or query:
+                docs, diag = self._list_documents_search(query, limit)
+                diagnostics.append(diag)
+                add_docs(docs)
+
+            # 3) Owner-scoped search for user companies/teams. This fixes the
+            # regression where the picker says zero docs even though the same
+            # OAuth user can see team documents.
+            companies = self.get_companies() or []
+            for company in companies:
+                if len(by_id) >= limit and not query:
+                    break
+                owner_id = company.get('id')
+                if not owner_id:
+                    continue
+                docs, diag = self._list_documents_search(query, limit, owner_id=owner_id)
+                diagnostics.append(diag)
+                add_docs(docs)
+
+            documents = list(by_id.values())[:limit]
+            documents.sort(key=lambda d: d.get('modified_at') or '', reverse=True)
+
+            self.last_document_search_diagnostics = diagnostics
+            log(f"Onshape picker document discovery returned {len(documents)} document(s)")
+            for diag in diagnostics:
+                log(f"   {diag.get('method')} {diag.get('endpoint')} status={diag.get('status')} count={diag.get('count')} owner={diag.get('owner_id', '')}")
+
+            return self._picker_cache_set('document_list', documents, cache_key, limit)
+        except Exception as e:
+            log(f"Error listing documents: {e}")
+            log(traceback.format_exc())
+            self.last_document_search_diagnostics = [{
+                'error': str(e),
+                'status': 'exception',
+                'count': 0,
+            }]
+            return []
+
+    def _get_workspace_elements_cached(self, document_id, workspace_id):
+        """Return workspace elements using a short-lived picker cache."""
+        cached = self._picker_cache_get('workspace_elements', document_id, workspace_id)
+        if cached is not None:
+            return cached
+
+        response = self._make_api_request(
+            'GET',
+            f'/documents/d/{document_id}/w/{workspace_id}/elements'
+        )
+        if response.status_code != 200:
+            log(f"Failed to list elements: HTTP {response.status_code}")
+            log(f"Response: {response.text[:500]}")
+            return []
+
+        return self._picker_cache_set('workspace_elements', response.json() or [], document_id, workspace_id)
+
+    def list_part_studio_elements(self, document_id, workspace_id):
+        """
+        List Part Studio elements in a document workspace.
+        """
+        try:
+            elements = self._get_workspace_elements_cached(document_id, workspace_id)
+            part_studios = []
+            for elem in elements or []:
+                elem_type = str(elem.get('type') or elem.get('elementType') or '').upper().replace(' ', '')
+                if elem_type in ('PARTSTUDIO', 'PARTSTUDIOS') or 'PARTSTUDIO' in elem_type:
+                    elem_id = elem.get('id')
+                    if elem_id:
+                        part_studios.append({
+                            'id': elem_id,
+                            'name': elem.get('name') or 'Part Studio',
+                            'type': elem.get('type') or elem.get('elementType') or 'Part Studio',
+                            'href': f"{self.BASE_URL}/documents/{document_id}/w/{workspace_id}/e/{elem_id}",
+                        })
+
+            return part_studios
+        except Exception as e:
+            log(f"Error listing Part Studios: {e}")
+            log(traceback.format_exc())
+            return []
+
+    def list_parts_for_import(self, document_id, workspace_id, element_id):
+        """
+        Return one selectable row per solid/body in a Part Studio.
+        """
+        try:
+            bodies_with_faces = self.get_body_faces(document_id, workspace_id, element_id)
+            parts = []
+            for body_id, body_data in (bodies_with_faces or {}).items():
+                faces = body_data.get('faces', [])
+                planar_faces = [f for f in faces if f.get('surfaceType') == 'PLANE']
+                largest_planar_area = max((f.get('area', 0) or 0 for f in planar_faces), default=0)
+                parts.append({
+                    'body_id': body_id,
+                    'name': body_data.get('name') or body_id,
+                    'face_count': len(faces),
+                    'planar_face_count': len(planar_faces),
+                    'largest_planar_area': largest_planar_area,
+                })
+
+            parts.sort(key=lambda p: (p['largest_planar_area'], p['face_count']), reverse=True)
+            return parts
+        except Exception as e:
+            log(f"Error listing importable parts: {e}")
+            log(traceback.format_exc())
+            return []
+
+    def get_document_info(self, document_id):
+        """Get information about a document."""
+        try:
+            cached = self._picker_cache_get('document_info', document_id)
+            if cached is not None:
+                return cached
+
             endpoint = f'/documents/{document_id}'
             log(f"   Calling: {self.API_BASE}{endpoint}")
             response = self._make_api_request('GET', endpoint)
             if response.status_code == 200:
-                return response.json()
+                return self._picker_cache_set('document_info', response.json(), document_id)
             else:
                 log(f"Failed to get document info: HTTP {response.status_code}")
                 log(f"Response: {response.text[:200]}")
@@ -1819,26 +2179,15 @@ class OnshapeClient:
             return None
     
     def get_element_info(self, document_id, workspace_id, element_id):
-        """Get information about an element (Part Studio, Assembly, etc.)"""
+        """Get information about an element (Part Studio, Assembly, etc.)."""
         try:
-            # Get all elements in the document
-            response = self._make_api_request(
-                'GET',
-                f'/documents/d/{document_id}/w/{workspace_id}/elements'
-            )
-            if response.status_code == 200:
-                elements = response.json()
-                log(f"   Found {len(elements)} elements in document")
-                # Find the matching element
-                for element in elements:
-                    if element.get('id') == element_id:
-                        return element
-                log(f"   Element {element_id} not found in {len(elements)} elements")
-                return None
-            else:
-                log(f"Failed to get elements: HTTP {response.status_code}")
-                log(f"Response: {response.text[:200]}")
-                return None
+            elements = self._get_workspace_elements_cached(document_id, workspace_id)
+            log(f"   Found {len(elements)} cached/listed elements in document")
+            for element in elements or []:
+                if element.get('id') == element_id:
+                    return element
+            log(f"   Element {element_id} not found in {len(elements or [])} elements")
+            return None
         except Exception as e:
             log(f"Error getting element info: {e}")
             log(traceback.format_exc())
