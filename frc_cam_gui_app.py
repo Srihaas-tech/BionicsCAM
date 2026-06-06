@@ -467,37 +467,18 @@ def get_onshape_client_or_401():
 
 
 def get_onshape_picker_client():
-    """
-    Return an Onshape client for the browser picker.
-
-    The original extension flow uses OAuth sessions. The new standalone picker
-    should also work on deployments that are configured with Onshape API keys,
-    because API-key auth does not need a user OAuth round trip.
-    """
-    client = session_manager.get_client(get_current_user_id())
-    if client:
-        return client
-
-    try:
-        api_key_client = get_onshape_client()
-        if getattr(api_key_client, '_has_api_key_auth', lambda: False)():
-            return api_key_client
-    except Exception as e:
-        log(f"Could not create API-key Onshape client for picker: {e}")
-
-    return None
+    """Return the OAuth Onshape client for the browser picker."""
+    return session_manager.get_client(get_current_user_id())
 
 
 def get_onshape_auth_config_error():
     """Return a human-readable OAuth setup error, or None if OAuth can start."""
     try:
         client = get_onshape_client()
-        if getattr(client, '_has_api_key_auth', lambda: False)():
-            return None
         if not client.config.get('client_id'):
             return 'Onshape OAuth is missing ONSHAPE_CLIENT_ID.'
         if not client.config.get('client_secret'):
-            return 'Onshape OAuth is missing ONSHAPE_CLIENT_SECRET. Add it in your environment, or configure ONSHAPE_ACCESS_KEY and ONSHAPE_SECRET_KEY for API-key mode.'
+            return 'Onshape OAuth is missing ONSHAPE_CLIENT_SECRET. Add it in your environment.'
         if not client.config.get('redirect_uri'):
             return 'Onshape OAuth is missing a redirect URI. Set BASE_URL so the callback becomes BASE_URL/onshape/oauth/callback.'
         return None
