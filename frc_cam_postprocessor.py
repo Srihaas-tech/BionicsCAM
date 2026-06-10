@@ -166,6 +166,7 @@ class FRCPostProcessor:
 
         # Fixturing preferences from config
         self.pause_before_perimeter = config.pause_before_perimeter  # Pause before perimeter for screw fixturing
+        self.optional_stop_after_holes = False  # Insert M01 after hole operations when requested by UI
 
         # Tube facing parameters
         self.tube_facing_offset = 0.0625  # Hole offset to align with faced surface at Y=+1/16" (inches)
@@ -1616,6 +1617,8 @@ class FRCPostProcessor:
                     gcode.append(f"(Hole {i} - {diameter:.3f}\" dia, {area:.3f} sq in - CONTOUR ONLY)")
                     gcode.extend(self._generate_pocket_contour_gcode(circle_points))
                     gcode.append("")
+
+            gcode.extend(self._generate_optional_stop_after_holes_gcode())
         
         # Pockets
         if self.pockets:
@@ -1746,6 +1749,17 @@ class FRCPostProcessor:
                 'dwell_time': self._format_time(time_estimate['dwell'])
             }
         )
+
+    def _generate_optional_stop_after_holes_gcode(self) -> List[str]:
+        """Generate an M01 optional stop after hole operations."""
+        if not getattr(self, 'optional_stop_after_holes', False):
+            return []
+        return [
+            "",
+            "(Optional stop after holes - inspect hole size/depth, clear chips, then Cycle Start)",
+            "M01",
+            ""
+        ]
 
     def _generate_gcode_header(self, timestamp: str = None, is_multilayer: bool = False) -> List[str]:
         """Generate common G-code header (comments + initialization)"""
@@ -2353,6 +2367,8 @@ class FRCPostProcessor:
                     gcode.append(f"(Large hole {diameter:.3f}\" dia - CONTOUR ONLY)")
                     gcode.extend(self._generate_pocket_contour_gcode(circle_points))
 
+                gcode.extend(self._generate_optional_stop_after_holes_gcode())
+
             if self.pockets:
                 gcode.append(f"(Layer {layer_name}: {len(self.pockets)} pockets)")
                 total_pockets += len(self.pockets)
@@ -2464,6 +2480,8 @@ class FRCPostProcessor:
                     gcode.append(f"(Hole {len(cleared_holes) + i} - {diameter:.3f}\" diameter - CONTOUR ONLY)")
                     gcode.extend(self._generate_pocket_contour_gcode(circle_points))
                     gcode.append("")
+
+                gcode.extend(self._generate_optional_stop_after_holes_gcode())
 
             if self.pockets:
                 gcode.append("(===== POCKETS =====)")
