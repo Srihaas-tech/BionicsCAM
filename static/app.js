@@ -103,6 +103,7 @@ const DEFAULT_SETTINGS = {
     material: 'plywood',
     thickness: '0.25',
     tabSpacing: '6.0',
+    tabsEnabled: true,
     tubeHeight: '2.0',
     squareEnd: true,
     cutToLength: true,
@@ -121,6 +122,7 @@ function saveSettings() {
         material: document.getElementById('material').value,
         thickness: document.getElementById('thickness').value,
         tabSpacing: document.getElementById('tabSpacing').value,
+        tabsEnabled: document.getElementById('tabsEnabled').checked,
         tubeHeight: document.getElementById('tubeHeight').value,
         use25d: document.getElementById('use25d').checked,
         squareEnd: document.getElementById('squareEnd').checked,
@@ -163,6 +165,11 @@ function loadSettings() {
         // If detected thickness exists, the HTML already has the correct value - don't override it
 
         document.getElementById('tabSpacing').value = settings.tabSpacing || DEFAULT_SETTINGS.tabSpacing;
+        const tabsEnabledEl = document.getElementById('tabsEnabled');
+        if (tabsEnabledEl) {
+            tabsEnabledEl.checked = settings.tabsEnabled !== undefined ? settings.tabsEnabled : DEFAULT_SETTINGS.tabsEnabled;
+            updateTabsToggleLabel();
+        }
         document.getElementById('tubeHeight').value = settings.tubeHeight || DEFAULT_SETTINGS.tubeHeight;
         document.getElementById('squareEnd').checked = settings.squareEnd !== undefined ? settings.squareEnd : DEFAULT_SETTINGS.squareEnd;
         document.getElementById('cutToLength').checked = settings.cutToLength !== undefined ? settings.cutToLength : DEFAULT_SETTINGS.cutToLength;
@@ -200,13 +207,18 @@ function loadSettings() {
  * Attach event listeners to form elements to auto-save on change
  */
 function setupSettingsAutoSave() {
-        const fields = ['material', 'thickness', 'tabSpacing', 'tubeHeight', 'squareEnd', 'cutToLength', 'toolDiameter', 'use25d'];
+        const fields = ['material', 'thickness', 'tabsEnabled', 'tabSpacing', 'tubeHeight', 'squareEnd', 'cutToLength', 'toolDiameter', 'use25d'];
 
     fields.forEach(fieldId => {
         const element = document.getElementById(fieldId);
         if (element) {
             const eventType = element.type === 'checkbox' ? 'change' : 'input';
-            element.addEventListener(eventType, saveSettings);
+            element.addEventListener(eventType, () => {
+                if (fieldId === 'tabsEnabled') {
+                    updateTabsToggleLabel();
+                }
+                saveSettings();
+            });
         }
     });
 }
@@ -214,6 +226,14 @@ function setupSettingsAutoSave() {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+function updateTabsToggleLabel() {
+    const tabsEnabled = document.getElementById('tabsEnabled');
+    const label = tabsEnabled?.closest('.toggle-switch')?.querySelector('.toggle-text');
+    if (label && tabsEnabled) {
+        label.textContent = tabsEnabled.checked ? 'Enabled' : 'Disabled';
+    }
+}
 
 /**
  * Create a bounds tracker for calculating min/max coordinates
@@ -583,6 +603,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Standard parameters
                 formData.append('thickness', document.getElementById('thickness').value);
                 formData.append('tab_spacing', document.getElementById('tabSpacing').value);
+                formData.append('tabs_enabled', document.getElementById('tabsEnabled').checked ? '1' : '0');
             }
             formData.append('rotation', rotationAngle); // Add rotation angle
             const quantityVal = parseInt(document.getElementById('quantity')?.value || '1', 10);
