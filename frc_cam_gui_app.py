@@ -89,6 +89,7 @@ def process_standard_dxf_file(
     use_25d,
     tab_spacing,
     tabs_enabled,
+    optional_stop_after_holes,
     team_config,
     user_name,
     suggested_filename,
@@ -109,6 +110,7 @@ def process_standard_dxf_file(
 
     pp.tab_spacing = tab_spacing
     pp.tabs_enabled = tabs_enabled
+    pp.optional_stop_after_holes = optional_stop_after_holes
     pp.load_dxf(input_path)
     pp.transform_coordinates(origin_corner, rotation)
     pp.identify_perimeter_and_pockets()
@@ -712,6 +714,7 @@ def process_file():
             # Standard mode parameters
             tab_spacing = float(request.form.get('tab_spacing', 6.0))
             tabs_enabled = request.form.get('tabs_enabled', '1') == '1'
+            optional_stop_after_holes = request.form.get('optional_stop_after_holes', '0') == '1'
 
         # Save uploaded file
         input_path = os.path.join(UPLOAD_FOLDER, 'input.dxf')
@@ -851,6 +854,7 @@ def process_file():
                             use_25d=use_25d,
                                             tab_spacing=tab_spacing,
                             tabs_enabled=tabs_enabled,
+                            optional_stop_after_holes=optional_stop_after_holes,
                             team_config=team_config,
                             user_name=user_name,
                             suggested_filename=part_base_name,
@@ -926,6 +930,7 @@ def process_file():
 
                     pp.tab_spacing = tab_spacing
                     pp.tabs_enabled = tabs_enabled
+                    pp.optional_stop_after_holes = optional_stop_after_holes
                     pp.load_dxf(input_path)
                     pp.transform_coordinates(origin_corner, rotation)
                     pp.identify_perimeter_and_pockets()  # Must come BEFORE classify_holes to remove perimeter circles
@@ -1076,7 +1081,8 @@ def process_file():
         else:
             parameters.update({
                 'tab_spacing': tab_spacing,
-                'tabs_enabled': tabs_enabled
+                'tabs_enabled': tabs_enabled,
+                'optional_stop_after_holes': optional_stop_after_holes
             })
 
         response_data = {
