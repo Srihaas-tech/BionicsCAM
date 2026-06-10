@@ -104,6 +104,7 @@ const DEFAULT_SETTINGS = {
     thickness: '0.25',
     tabSpacing: '6.0',
     tabsEnabled: true,
+    optionalStopAfterHoles: false,
     tubeHeight: '2.0',
     squareEnd: true,
     cutToLength: true,
@@ -123,6 +124,7 @@ function saveSettings() {
         thickness: document.getElementById('thickness').value,
         tabSpacing: document.getElementById('tabSpacing').value,
         tabsEnabled: document.getElementById('tabsEnabled').checked,
+        optionalStopAfterHoles: document.getElementById('optionalStopAfterHoles')?.checked || false,
         tubeHeight: document.getElementById('tubeHeight').value,
         use25d: document.getElementById('use25d').checked,
         squareEnd: document.getElementById('squareEnd').checked,
@@ -165,10 +167,15 @@ function loadSettings() {
         // If detected thickness exists, the HTML already has the correct value - don't override it
 
         document.getElementById('tabSpacing').value = settings.tabSpacing || DEFAULT_SETTINGS.tabSpacing;
+        const optionalStopAfterHolesEl = document.getElementById('optionalStopAfterHoles');
+        if (optionalStopAfterHolesEl) {
+            optionalStopAfterHolesEl.checked = settings.optionalStopAfterHoles !== undefined ? settings.optionalStopAfterHoles : DEFAULT_SETTINGS.optionalStopAfterHoles;
+            updateToggleLabel(optionalStopAfterHolesEl);
+        }
         const tabsEnabledEl = document.getElementById('tabsEnabled');
         if (tabsEnabledEl) {
             tabsEnabledEl.checked = settings.tabsEnabled !== undefined ? settings.tabsEnabled : DEFAULT_SETTINGS.tabsEnabled;
-            updateTabsToggleLabel();
+            updateToggleLabel(tabsEnabledEl);
         }
         document.getElementById('tubeHeight').value = settings.tubeHeight || DEFAULT_SETTINGS.tubeHeight;
         document.getElementById('squareEnd').checked = settings.squareEnd !== undefined ? settings.squareEnd : DEFAULT_SETTINGS.squareEnd;
@@ -207,15 +214,15 @@ function loadSettings() {
  * Attach event listeners to form elements to auto-save on change
  */
 function setupSettingsAutoSave() {
-        const fields = ['material', 'thickness', 'tabsEnabled', 'tabSpacing', 'tubeHeight', 'squareEnd', 'cutToLength', 'toolDiameter', 'use25d'];
+    const fields = ['material', 'thickness', 'tabsEnabled', 'tabSpacing', 'optionalStopAfterHoles', 'tubeHeight', 'squareEnd', 'cutToLength', 'toolDiameter', 'use25d'];
 
     fields.forEach(fieldId => {
         const element = document.getElementById(fieldId);
         if (element) {
             const eventType = element.type === 'checkbox' ? 'change' : 'input';
             element.addEventListener(eventType, () => {
-                if (fieldId === 'tabsEnabled') {
-                    updateTabsToggleLabel();
+                if (fieldId === 'tabsEnabled' || fieldId === 'optionalStopAfterHoles') {
+                    updateToggleLabel(element);
                 }
                 saveSettings();
             });
@@ -227,12 +234,15 @@ function setupSettingsAutoSave() {
 // Helper Functions
 // ============================================================================
 
-function updateTabsToggleLabel() {
-    const tabsEnabled = document.getElementById('tabsEnabled');
-    const label = tabsEnabled?.closest('.toggle-switch')?.querySelector('.toggle-text');
-    if (label && tabsEnabled) {
-        label.textContent = tabsEnabled.checked ? 'Enabled' : 'Disabled';
+function updateToggleLabel(toggleElement) {
+    const label = toggleElement?.closest('.toggle-switch')?.querySelector('.toggle-text');
+    if (label && toggleElement) {
+        label.textContent = toggleElement.checked ? 'Enabled' : 'Disabled';
     }
+}
+
+function updateTabsToggleLabel() {
+    updateToggleLabel(document.getElementById('tabsEnabled'));
 }
 
 /**
@@ -604,6 +614,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 formData.append('thickness', document.getElementById('thickness').value);
                 formData.append('tab_spacing', document.getElementById('tabSpacing').value);
                 formData.append('tabs_enabled', document.getElementById('tabsEnabled').checked ? '1' : '0');
+                formData.append('optional_stop_after_holes', document.getElementById('optionalStopAfterHoles')?.checked ? '1' : '0');
             }
             formData.append('rotation', rotationAngle); // Add rotation angle
             const quantityVal = parseInt(document.getElementById('quantity')?.value || '1', 10);
