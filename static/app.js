@@ -100,11 +100,11 @@ function calculateArcBounds(centerX, centerY, radius, startAngle, endAngle) {
  * Default settings for the application
  */
 const DEFAULT_SETTINGS = {
-    material: 'plywood',
+    material: 'polycarbonate',
     thickness: '0.25',
     tabSpacing: '6.0',
-    tabsEnabled: true,
-    optionalStopAfterHoles: false,
+    tabsEnabled: false,
+    optionalStopAfterHoles: true,
     tubeHeight: '2.0',
     squareEnd: true,
     cutToLength: true,
