@@ -288,6 +288,7 @@
                             <input type="number" id="toolDiameter" step="0.001" value="{{ default_tool_diameter }}" min="0.01" required>
                         </div>
                             <br>
+                            <br>
                         <div class="param-group">
                             <label for="tabsEnabled">Holding tabs <span class="label-hint">Leave small bridges so parts stay attached</span></label>
                             <label class="toggle-switch">
@@ -315,7 +316,8 @@
                     {% if detected_thickness %}
                     <div class="info-message">Thickness was detected from the CAD part. Match stock to this value before cutting.</div>
                     {% endif %}
-
+                    <br>
+                    <br
                     <div class="param-group" id="nestRotationGroup">
                         <label for="nestRotation">Nesting rotation</label>
                         <select id="nestRotation">
