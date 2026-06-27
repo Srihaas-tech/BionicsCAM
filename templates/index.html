@@ -287,13 +287,15 @@
                             <label for="toolDiameter">Tool diameter <span class="label-hint">4 mm is about 0.157 in</span></label>
                             <input type="number" id="toolDiameter" step="0.001" value="{{ default_tool_diameter }}" min="0.01" required>
                         </div>
-                            <br>
 
+                        <h2 class="panel-title">Advanced</h2>
+                        <p class="panel-copy">Change advanced settings for the cutting process</p>
+
+                            <br>
                             <!--  Empty Div  -->
                              <div class="param-group">
                                 <span display ="none"></span>
                              </div>
-                             
                             <br>
 
                         <div class="param-group">
@@ -324,6 +326,8 @@
                     <div class="info-message">Thickness was detected from the CAD part. Match stock to this value before cutting.</div>
                     {% endif %}
                     <br>
+
+                    <h2 class="panel-title">Nesting</h2>
 
                     <div class="param-group" id="nestRotationGroup">
                         <label for="nestRotation">Nesting rotation</label>
