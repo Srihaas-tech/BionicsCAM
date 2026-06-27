@@ -73,9 +73,8 @@
     <main class="stage">
         <section class="hero-grid" aria-labelledby="heroTitle">
             <div class="hero-copy">
-                <div class="eyebrow">DXF to verified CNC program</div>
-                <h1 id="heroTitle">Build the file. Check the cut.</h1>
-                <p>Import from Onshape or drop DXFs, tune the recipe, orient the setup, and generate machine-ready NC output without leaving this cockpit.</p>
+                <h1 id="heroTitle">From Onshape to DXF</h1>
+                <p>Import from Onshape or drop DXFs, tune the settings, orient the setup, and generate machine-ready NC output.</p>
             </div>
             <aside class="hero-card" aria-label="Fast actions">
                 <div>
@@ -292,7 +291,7 @@
                         <div class="param-group">
                             <label for="tabsEnabled">Holding tabs <span class="label-hint">Leave small bridges so parts stay attached</span></label>
                             <label class="toggle-switch">
-                                <input type="checkbox" id="tabsEnabled" checked>
+                                <input type="checkbox" id="tabsEnabled">
                                 <span class="toggle-slider"></span>
                                 <span class="toggle-text">Enabled</span>
                             </label>
@@ -317,10 +316,6 @@
                     <div class="info-message">Thickness was detected from the CAD part. Match stock to this value before cutting.</div>
                     {% endif %}
 
-                    <div class="nest-note">
-                        <strong>Auto nesting is handled server-side.</strong><br>
-                        The page sends quantity and geometry only; placement decisions remain in the backend.
-                    </div>
                     <div class="param-group" id="nestRotationGroup" style="display: none;">
                         <label for="nestRotation">Nesting rotation</label>
                         <select id="nestRotation">
