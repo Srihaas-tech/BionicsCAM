@@ -1,7 +1,8 @@
 # BionicsCAM 🦝
 
 **Onshape-to-CNC CAM for FRC teams who would rather build robots than wrestle CAM software.**
-The issue with most README's is that they are, well, boring. It seems like every README, including the README from the repo that this was forked from is just a bunch of words written by a dev that would rather be doing anything else but write the README. I aim to change that. I want to add a few jokes and such to fix the README because a README should be readable
+
+The issue with most README's is that they are, well, boring. It seems like every README, including the README from the repo that this was forked from is just a bunch of words written by a dev that would rather be doing anything else but write the README. I aim to change that. I want to add a few jokes and such to fix the README because a README should be readable.
 
 BionicsCAM is a browser-based CNC workflow for flat FRC parts. It can import DXFs manually, pull selected faces from Onshape, generate toolpaths, preview G-code, and export ready-to-run NC files.
 
