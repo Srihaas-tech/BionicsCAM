@@ -411,3 +411,5 @@ CNC routers are real machines. They do not care that the preview looked cute.
 Always verify toolpaths, clamp material, set zeros correctly, and keep hands away from the danger zone.
 
 If something looks wrong, stop. The raccoon can wait.
+
+P.S. Never let a 14 year old design a README.md
