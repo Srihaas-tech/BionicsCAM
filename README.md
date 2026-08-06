@@ -8,7 +8,7 @@ BionicsCAM is a browser-based CNC workflow for flat FRC parts. It can import DXF
 
 It started as a fork/rebrand of **PenguinCAM by FRC Team 6238**, then wandered into the trash can and came back with Onshape integration, auto-nesting, Vercel deployment, and a suspicious number of raccoon jokes.
 
-**Live app:** <https://cad.team4909.org>
+**Live app:** <https://cam.team4909.org>
 
 🔗 **Demo video:**  
 [![Demo video](https://img.youtube.com/vi/gFReFDz-_LI/0.jpg)](https://youtu.be/zPZCTVh2n2Q)
