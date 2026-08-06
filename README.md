@@ -1,12 +1,13 @@
 # BionicsCAM 🦝
 
 **Onshape-to-CNC CAM for FRC teams who would rather build robots than wrestle CAM software.**
+The issue with most README's is that they are, well, boring. It seems like every README, including the README from the repo that this was forked from is just a bunch of words written by a dev that would rather be doing anything else but write the README. I aim to change that. I want to add a few jokes and such to fix the README because a README should be readable
 
 BionicsCAM is a browser-based CNC workflow for flat FRC parts. It can import DXFs manually, pull selected faces from Onshape, generate toolpaths, preview G-code, and export ready-to-run NC files.
 
 It started as a fork/rebrand of **PenguinCAM by FRC Team 6238**, then wandered into the trash can and came back with Onshape integration, auto-nesting, Vercel deployment, and a suspicious number of raccoon jokes.
 
-**Live app:** <https://bionicscam.vercel.app>
+**Live app:** <https://cad.team4909.org>
 
 🔗 **Demo video:**  
 [![Demo video](https://img.youtube.com/vi/gFReFDz-_LI/0.jpg)](https://youtu.be/zPZCTVh2n2Q)
@@ -44,7 +45,7 @@ The raccoon philosophy:
 
 First thing's first: huge thanks to **FRC Team 6238, Popcorn Penguins**, for PenguinCAM.
 
-BionicsCAM started late at night when our team needed a part immediately and the hosted PenguinCAM instance was unavailable. We got a local version running, then the project spiraled into a Vercel-hosted app with Onshape integration, auto-nesting, and enough debugging chaos to accidentally create a raccoon-themed engineering religion.
+BionicsCAM started late at night when our team needed a part immediately and the hosted PenguinCAM instance was unavailable. Railway was down. We got a local version running, then the project spiraled into a Vercel-hosted app with Onshape integration, auto-nesting, and enough debugging chaos to accidentally create a raccoon-themed engineering religion.
 
 The goal is simple: make it easier for the whole team to go from CAD to router-ready G-code without forcing every student to become a CAM expert on day one.
 
@@ -132,6 +133,9 @@ If Onshape import fails because of permissions, make sure the logged-in user can
 
 Manual upload is the emergency exit when the Onshape raccoon eats the API tokens.
 
+ ### Edit: There is now a third option. Import from BionicsCAM itself.
+ 1. Click the "Import one part from Onshape" button
+ 2. Follow the on-screen instructions to find your part.
 ---
 
 ## Recommended Student Workflow
