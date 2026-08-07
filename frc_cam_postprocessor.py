@@ -1699,7 +1699,7 @@ class FRCPostProcessor:
             if self.tabs_enabled:
                 gcode.append("(===== PERIMETER WITH TABS =====)")
             else:
-                gcode.append("(===== PERIMETER (NO TABS) =====)")
+                gcode.append("(===== PERIMETER NO TABS =====)")
 
             gcode.extend(self._generate_perimeter_gcode(self.perimeter))
             gcode.append("")
